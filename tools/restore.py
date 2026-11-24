@@ -23,6 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zentlib import Zent, wait_device  # noqa: E402
+import rammap  # noqa: E402
 
 # config_name1 lives here (profile name, 64 bytes); harmless to tweak for the self-test.
 CONFIG_NAME1 = 0x80070290
@@ -57,6 +58,8 @@ def restore(dump, verify_only=False):
         z.switch_profile(p)
         if not verify_only:
             for name, r in regs.items():
+                if name in rammap.READ_ONLY:
+                    continue  # soft_version / cur_param_num: device-managed, not writable
                 z.write_ram(r["addr"], bytes.fromhex(r["data"]))
             z.save()
             time.sleep(0.3)
