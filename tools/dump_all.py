@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase-0 full backup of the ZENT75-HE config (read-only: BE 04 + BE C0 profile switch).
+"""Full backup of the ZENT75-HE config (read-only: BE 04 + BE C0 profile switch).
 
 Dumps every RAM-map region for all 4 profiles into backups/<ts>/ as raw .bin + combined JSON
 with sha256 sums. Restores the originally-active profile at the end. No flash/save/write.

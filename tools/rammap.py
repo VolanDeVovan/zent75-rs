@@ -1,7 +1,7 @@
 """RAM map of the ZENT75-HE stock firmware: the one place where the addresses live.
 
-These are the addresses the vendor driver calls "RAM" (`BE 03` write / `BE 04` read), see the
-table in README.md. `0x8007xxxx` is board-global, `0x8008xxxx` belongs to the active profile
+These are the addresses the vendor driver calls "RAM" (`BE 03` write / `BE 04` read), see
+docs/protocol.md. `0x8007xxxx` is board-global, `0x8008xxxx` belongs to the active profile
 and is swapped by `BE C0`.
 
 Lengths are byte counts. The 83 x u16 tables are therefore 166 bytes long.

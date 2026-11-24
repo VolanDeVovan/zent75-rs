@@ -1,13 +1,10 @@
-/* Memory map for the HOVEY WORKS ZENT75-HE (HPM5300-family, RV32IMAFDC).
+/* Memory map for the HOVEY WORKS ZENT75-HE (HPM5361, RV32IMAFDC). See docs/hardware.md.
  *
- * This board ships a TinyUF2 bootloader, NOT the stock "boot header at base +
- * app right after" layout the hpm-hal example uses. On this board:
- *
- *   0x80000000..0x8003FFFF : factory XPI boot header + TinyUF2 bootloader.
- *                            *** MUST NEVER BE WRITTEN *** (our recovery path).
- *   0x80040000..           : our application image. TinyUF2 validates the first
- *                            32-bit word (boot signature 0x0B4D5475) and jumps
- *                            to the entry at 0x80040004.
+ *   0x80000000..0x8003FFFF : boot header, stage-0 (recovery), download loader.
+ *                            *** MUST NEVER BE WRITTEN *** (docs/boot-recovery.md).
+ *   0x80040000..0x8006FFFF : our application image. Stage-0 checks word 0 (boot
+ *                            signature 0x0B4D5475) and jumps to 0x80040004.
+ *   0x80070000..           : config banks (shared with the stock firmware).
  *
  * So REGION_TEXT starts at 0x80040000 and the very first word of the image must
  * be the signature (see link-app.x, section `.app_signature`). We do NOT emit an
@@ -15,8 +12,8 @@
  */
 MEMORY
 {
-    /* Application image region accepted by the stock TinyUF2 bootloader. */
-    XPI0_APP    : ORIGIN = 0x80040000, LENGTH = 0x80100000 - 0x80040000 /* 0xC0000 = 768K */
+    /* Application image region (tools/flash_uf2.py refuses anything outside it). */
+    XPI0_APP    : ORIGIN = 0x80040000, LENGTH = 0x80070000 - 0x80040000 /* 0x30000 = 192K, stops at the config banks */
     ILM         : ORIGIN = 0x00000000, LENGTH = 128K /* instruction local memory */
     DLM         : ORIGIN = 0x00080000, LENGTH = 128K /* data local memory */
     AHB_SRAM    : ORIGIN = 0xf0400000, LENGTH = 32K

@@ -8,33 +8,30 @@ Flow (all without a human replug):
   4. TinyUF2 flashes and auto-resets; wait for the app to re-enumerate as 36B0:357E
   5. verify the reported firmware version over the vendor raw-HID interface
 
-Mount/umount/blockdev need sudo (authorized for this board). See docs/bootloader.md.
+Mount/umount/blockdev need sudo (authorized for this board).
 
 Safety: every image is checked before anything is sent to the board (`check_uf2`). Blocks may only
 target the application region 0x80040000..0x8006FFFF. 0x80000000..0x8003FFFF holds the boot header,
 stage-0 (the hold-A+S+D recovery trigger) and the download loader; overwriting it removes the only
-app-independent way back, so there is deliberately no override flag. See docs/bootloader.md §7.
+app-independent way back, so there is deliberately no override flag. See docs/boot-recovery.md.
 
-usage: flash_uf2.py firmware/0.0.18.uf2 [--expect 0.0.18] [--no-enter]
+usage: flash_uf2.py firmware/vendor/0.0.18.uf2 [--expect 0.0.18] [--no-enter]
 """
 import argparse
 import glob
 import os
-import struct
+import shutil
 import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from zentlib import Zent, find_hidraw, wait_device  # noqa: E402
+import uf2
+from uf2 import FAMILY_ID
+from zentlib import CMD_BOOTLOADER, Zent, find_hidraw, wait_device
 
-BL_VID = "34b7"          # bootloader-mode USB vendor id
-
-UF2_MAGIC0, UF2_MAGIC1, UF2_MAGIC_END = 0x0A324655, 0x9E5D5157, 0x0AB16F30
-UF2_FLAG_FAMILY = 0x2000
-FAMILY_ID = 0x0B4D5475
 PROTECTED = (0x80000000, 0x80040000)  # boot header + stage-0 (A+S+D recovery) + download loader
 APP_REGION = (0x80040000, 0x80070000)  # application; config banks start at 0x80070000
+SCRATCH = os.environ.get("ZENT_MNT", "/tmp/zent_uf2_mnt")  # mount point for the bootloader disk
 
 
 class UnsafeImage(ValueError):
@@ -47,28 +44,23 @@ def check_uf2(data: bytes) -> int:
     Every block must be a well-formed UF2 block for family 0x0B4D5475 whose whole payload lies inside
     APP_REGION. Anything touching PROTECTED is refused: it would destroy the recovery path.
     """
-    if not data or len(data) % 512:
-        raise UnsafeImage(f"size {len(data)} is not a non-zero multiple of 512")
-    blocks = len(data) // 512
-    for i in range(blocks):
-        blk = data[i * 512:(i + 1) * 512]
-        m0, m1, flags, addr, size, _no, _total, family = struct.unpack("<8I", blk[:32])
-        (m_end,) = struct.unpack("<I", blk[508:512])
-        if (m0, m1, m_end) != (UF2_MAGIC0, UF2_MAGIC1, UF2_MAGIC_END):
-            raise UnsafeImage(f"block {i}: bad UF2 magic")
-        if not flags & UF2_FLAG_FAMILY or family != FAMILY_ID:
-            raise UnsafeImage(f"block {i}: family {family:#010x} (flags {flags:#x}), expected {FAMILY_ID:#010x}")
-        if not 0 < size <= 476:
-            raise UnsafeImage(f"block {i}: payload size {size}")
-        end = addr + size
-        if addr < PROTECTED[1] and end > PROTECTED[0]:
-            raise UnsafeImage(f"block {i}: {addr:#010x}..{end:#010x} overlaps the protected boot region "
+    try:
+        blocks = uf2.parse_bytes(data)  # size, magics, payload size <= 476
+    except ValueError as e:
+        raise UnsafeImage(str(e)) from None
+    for i, b in enumerate(blocks):
+        if not b.flags & uf2.FLAG_FAMILY_ID or b.family != FAMILY_ID:
+            raise UnsafeImage(f"block {i}: family {b.family:#010x} (flags {b.flags:#x}), expected {FAMILY_ID:#010x}")
+        if b.size == 0:
+            raise UnsafeImage(f"block {i}: payload size {b.size}")
+        end = b.addr + b.size
+        if b.addr < PROTECTED[1] and end > PROTECTED[0]:
+            raise UnsafeImage(f"block {i}: {b.addr:#010x}..{end:#010x} overlaps the protected boot region "
                               f"{PROTECTED[0]:#010x}..{PROTECTED[1]:#010x} (stage-0 / A+S+D recovery / loader)")
-        if addr < APP_REGION[0] or end > APP_REGION[1]:
-            raise UnsafeImage(f"block {i}: {addr:#010x}..{end:#010x} is outside the application region "
+        if b.addr < APP_REGION[0] or end > APP_REGION[1]:
+            raise UnsafeImage(f"block {i}: {b.addr:#010x}..{end:#010x} is outside the application region "
                               f"{APP_REGION[0]:#010x}..{APP_REGION[1]:#010x}")
-    return blocks
-SCRATCH = os.environ.get("ZENT_MNT", "/tmp/zent_uf2_mnt")
+    return len(blocks)
 
 
 def log(*a):
@@ -85,7 +77,6 @@ def find_uf2_disk(timeout=25.0):
             vendor = _sys_read(f"/sys/block/{name}/device/vendor")
             if model and ("UF2" in model or "Zent" in (vendor or "")):
                 return dev
-        # fall back: any single removable sd that just appeared
         time.sleep(0.5)
     return None
 
@@ -104,7 +95,7 @@ def enter_bootloader():
         return
     z = Zent(dev)
     log(f"app firmware {z.version()} on {dev}; sending BE FC (enter bootloader)")
-    z.simple(0xFC)
+    z.simple(CMD_BOOTLOADER)
     time.sleep(0.2)
     z.close()
 
@@ -115,8 +106,8 @@ def mount_rw(disk):
     for attempt in range(3):
         subprocess.run(["sudo", "umount", SCRATCH], check=False,
                        stderr=subprocess.DEVNULL)
-        r = subprocess.run(["sudo", "mount", "-o", f"rw,uid={os.getuid()}", disk, SCRATCH],
-                           capture_output=True, text=True)
+        subprocess.run(["sudo", "mount", "-o", f"rw,uid={os.getuid()}", disk, SCRATCH],
+                       capture_output=True, text=True)
         opts = subprocess.run(["findmnt", "-no", "OPTIONS", SCRATCH],
                               capture_output=True, text=True).stdout
         if "rw," in opts or opts.strip().startswith("rw"):
@@ -150,7 +141,6 @@ def flash(uf2_path, enter=True, expect=None, settle=40):
         log("ERROR: could not mount the UF2 disk read-write")
         return 4
     try:
-        import shutil
         shutil.copy(uf2_path, os.path.join(SCRATCH, os.path.basename(uf2_path)))
         subprocess.run(["sync"], check=False)
         log(f"copied {os.path.basename(uf2_path)} -> {disk}; TinyUF2 is flashing")

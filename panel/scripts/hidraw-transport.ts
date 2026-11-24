@@ -10,10 +10,9 @@ import { closeSync, constants, existsSync, openSync, readFileSync, readSync, rea
 import { basename, dirname, join } from "node:path";
 import { Emitter, type DisconnectListener, type ReportListener, type Transport, type TransportInfo } from "../src/protocol/transport";
 import { REPORT_ID, REPORT_SIZE } from "../src/protocol/zent/frames";
+import { ZENT_PRODUCT_ID, ZENT_VENDOR_ID } from "../src/transport/webhid";
 
-export const ZENT_VID = 0x36b0;
-export const ZENT_PID = 0x357e;
-export const VENDOR_INTERFACE = 2;
+const VENDOR_INTERFACE = 2;
 
 export class DeviceUnavailableError extends Error {}
 
@@ -64,7 +63,7 @@ export function listHidraw(sysRoot = "/sys/class/hidraw"): HidrawCandidate[] {
 
 /** The vendor raw-HID interface of the ZENT75-HE: 36b0:357e, interface 02. */
 export function findZentHidraw(sysRoot?: string): HidrawCandidate | null {
-  const mine = listHidraw(sysRoot).filter((c) => c.vendorId === ZENT_VID && c.productId === ZENT_PID);
+  const mine = listHidraw(sysRoot).filter((c) => c.vendorId === ZENT_VENDOR_ID && c.productId === ZENT_PRODUCT_ID);
   return mine.find((c) => c.interfaceNumber === VENDOR_INTERFACE) ?? mine.find((c) => c.vendorUsage) ?? null;
 }
 
@@ -90,7 +89,7 @@ export class HidrawTransport implements Transport {
   private disconnects = new Emitter<unknown>();
 
   constructor(readonly path: string, productName = "ZENT75-HE") {
-    this.info = { productName, vendorId: ZENT_VID, productId: ZENT_PID, backend: `hidraw:${path}` };
+    this.info = { productName, vendorId: ZENT_VENDOR_ID, productId: ZENT_PRODUCT_ID, backend: `hidraw:${path}` };
   }
 
   async open(): Promise<void> {

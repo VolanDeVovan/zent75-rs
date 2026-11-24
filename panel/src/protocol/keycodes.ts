@@ -121,10 +121,6 @@ export function keyTitle(code: number): string {
   return d ? `${d.title} (${code})` : `Unknown code ${code}`;
 }
 
-export function isKnownKeyCode(code: number): boolean {
-  return BY_CODE.has(code);
-}
-
 /** Order of groups in the key picker. */
 export const PICKER_GROUPS: readonly KeyGroup[] = [
   "letters", "digits", "punctuation", "editing", "modifiers", "function", "navigation", "numpad",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot autonomous rollback for the ZENT75-HE (GOAL Phase-0 step 5):
+# One-shot rollback of the ZENT75-HE to stock firmware + saved config:
 #   1. flash the vendor stock image (default firmware/vendor/0.0.18.uf2) via the UF2 bootloader
 #   2. restore the most recent config backup (backups/<latest>/) and verify every region
 #   3. leave the board in application mode on stock firmware with the user's config

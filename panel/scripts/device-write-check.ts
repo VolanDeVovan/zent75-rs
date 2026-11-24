@@ -2,8 +2,8 @@
  * Harmless WRITE round-trip against the real keyboard, driven entirely through the panel's own
  * KeyboardProtocol stack (same codec the WebHID UI uses) over the Node hidraw transport.
  *
- * It proves the panel can edit + save + restore on real hardware (GOAL "Done when" for Track B)
- * without disturbing the user's config: it only touches a profile name, then puts it back.
+ * It proves the panel can edit + save + restore on real hardware without disturbing the user's
+ * config: it only touches a profile name, then puts it back.
  *
  *   npm run write-check                 real keyboard (auto-discovered)
  *   npm run write-check -- --mock       same code path against the mock

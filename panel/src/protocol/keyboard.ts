@@ -142,8 +142,6 @@ export interface LiveSample {
   travelUm: number[] | null;
 }
 
-export type ProfileSection = keyof ProfileConfig;
-
 export interface KeyboardEvents {
   /** the board switched profile on its own (Fn shortcut) or after a request */
   profile: number;

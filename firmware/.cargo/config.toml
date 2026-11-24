@@ -2,8 +2,8 @@
 target = "riscv32imafc-unknown-none-elf"
 
 [target.riscv32imafc-unknown-none-elf]
-# NOTE: flashing is gated (see firmware/README.md and docs/firmware-plan.md Risk 2).
-# This runner is only used by `cargo run`, which we do NOT use yet. Kept for later.
+# Only used by `cargo run` with a JTAG probe (needs the case open). Normal flashing is
+# UF2: ./package-uf2.sh then tools/flash_uf2.py — see docs/boot-recovery.md.
 runner = [
     "probe-rs",
     "run",

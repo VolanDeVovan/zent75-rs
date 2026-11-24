@@ -2,15 +2,13 @@
 name = "zent75-rs"
 version = "0.0.0"
 edition = "2021"
-description = "Track C firmware skeleton for the HOVEY WORKS ZENT75-HE (HPM5300-family RISC-V)"
+description = "Firmware for the HOVEY WORKS ZENT75-HE (HPM5361, RISC-V)"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# HPMicro official embedded-Rust HAL. hpm5301 is a subset of hpm5361; the example
-# notes either is fine, and docs/firmware-plan.md picks hpm5361 (safe for any
-# HPM5300-family part on this board). Git dependency pinned to a known-good rev
-# (re/cache is not committed, so no path dep).
+# HPMicro official embedded-Rust HAL; the MCU is an HPM5361 (docs/hardware.md).
+# Git dependency pinned to a known-good rev.
 hpm-hal = { git = "https://github.com/hpmicro/hpm-hal", rev = "620f58df241d541d5d5cb1575407a16351da49fd", features = [
     "rt",
     "embassy",

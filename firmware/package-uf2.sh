@@ -4,12 +4,11 @@
 #
 #   cargo build --release      -> ELF for riscv32imafc
 #   llvm-objcopy -O binary      -> flat .bin of the flash image (app @ 0x80040000)
-#   uf2conv.py                  -> firmware/zent75-rs.uf2
+#   tools/uf2.py pack           -> firmware/zent75-rs.uf2
 #                                  (family 0x0B4D5475, base 0x80040000)
 #
-# This script builds and packages ONLY. It never flashes. Flashing custom
-# firmware is gated until docs/bootloader.md establishes an app-independent
-# recovery path (see firmware/README.md and docs/firmware-plan.md Risk 2).
+# This script builds and packages ONLY. It never flashes; tools/flash_uf2.py
+# does that (see firmware/README.md).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -51,8 +50,7 @@ if [ "$word0" != "0b4d5475" ]; then
 fi
 echo ">> boot signature OK: word0 = 0x$word0"
 
-echo ">> python3 uf2conv.py $BIN -b $BASE -f $FAMILY -o $UF2"
-python3 uf2conv.py "$BIN" -b "$BASE" -f "$FAMILY" -o "$UF2"
+echo ">> python3 ../tools/uf2.py pack $BIN -b $BASE -f $FAMILY -o $UF2"
+python3 ../tools/uf2.py pack "$BIN" -b "$BASE" -f "$FAMILY" -o "$UF2"
 
 echo ">> done: $(pwd)/$UF2"
-echo ">> NOTE: do NOT flash until docs/bootloader.md has an app-independent recovery path."

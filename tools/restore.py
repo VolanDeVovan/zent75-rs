@@ -11,9 +11,9 @@ Modes:
   restore.py backups/<ts> --verify   read-only: just compare the device to the dump, write nothing
   restore.py --selftest              harmless round-trip proof: snapshot the active profile's name,
                                      change it, save, verify the change, restore it, save, and
-                                     confirm a byte-identical read-back (GOAL Phase-0 step 2)
+                                     confirm a byte-identical read-back
 
-Writes to flash. Authorized for this board; see docs/ and the project GOAL.
+Without --verify this writes to flash.
 """
 import argparse
 import json
@@ -21,12 +21,12 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from zentlib import Zent, wait_device  # noqa: E402
-import rammap  # noqa: E402
+import rammap
+from zentlib import Zent, wait_device
 
-# config_name1 lives here (profile name, 64 bytes); harmless to tweak for the self-test.
-CONFIG_NAME1 = 0x80070290
+# config_name1 (first profile name); harmless to tweak for the self-test.
+CONFIG_NAME1 = rammap.CONFIG_NAME
+NAME_SIZE = rammap.PROFILE_NAME_SIZE
 
 
 def log(*a):
@@ -36,7 +36,8 @@ def log(*a):
 def load_dump(path):
     if os.path.isdir(path):
         path = os.path.join(path, "dump.json")
-    return json.load(open(path))
+    with open(path) as f:
+        return json.load(f)
 
 
 def verify_profile(z, regs):
@@ -77,21 +78,21 @@ def selftest():
     z = Zent(wait_device(20))
     active = z.profile()
     log(f"firmware {z.version()} active profile {active}  (SELF-TEST on config_name1)")
-    original = z.read_ram(CONFIG_NAME1, 64)
+    original = z.read_ram(CONFIG_NAME1, NAME_SIZE)
     log(f"  original name: {original.split(bytes(1))[0][:16]!r}")
-    probe = b"ZENT_RESTORE_TEST" + b"\x00" * (64 - 17)
+    probe = b"ZENT_RESTORE_TEST".ljust(NAME_SIZE, b"\x00")
     try:
         z.write_ram(CONFIG_NAME1, probe)
         z.save()
         time.sleep(0.3)
-        got = z.read_ram(CONFIG_NAME1, 64)
+        got = z.read_ram(CONFIG_NAME1, NAME_SIZE)
         assert got == probe, "write+save did not take"
         log("  wrote probe name and read it back identical  [write/save path OK]")
     finally:
         z.write_ram(CONFIG_NAME1, original)
         z.save()
         time.sleep(0.3)
-    back = z.read_ram(CONFIG_NAME1, 64)
+    back = z.read_ram(CONFIG_NAME1, NAME_SIZE)
     ok = back == original
     log(f"  restored original name, read-back identical: {ok}")
     z.close()

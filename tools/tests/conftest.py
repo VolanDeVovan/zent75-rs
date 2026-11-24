@@ -10,7 +10,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import rammap  # noqa: E402
 import zentlib  # noqa: E402
 
 
@@ -33,10 +32,6 @@ class FakeKeyboard(threading.Thread):
         self.serial = bytes(range(0x10, 0x20))
         self.requests: list[bytes] = []  # raw 1025-byte reports as received
         self.saves = 0
-        self.calibrating = False
-        self.calibration_log: list[bool] = []
-        self.stream_travel: list[bytes] = []  # reports sent on every heartbeat (normal mode)
-        self.stream_raw6: list[bytes] = []  # ... and in calibration mode
         # fault injection
         self.drop_replies = 0  # swallow the next N replies
         self.corrupt_replies = 0  # flip a data byte (CRC then fails) in the next N read replies
@@ -106,22 +101,9 @@ class FakeKeyboard(threading.Thread):
                 self._reply(zentlib.encode_simple(zentlib.CMD_SWITCH_PROFILE, r[4]))
         elif cmd == zentlib.CMD_SERIAL:
             self._reply(bytes([0xBE, 0x1D, 21, 0]) + self.serial + b"\xED")
-        elif cmd == zentlib.CMD_HEARTBEAT:
-            for frame in (self.stream_raw6 if self.calibrating else self.stream_travel):
-                self._reply(frame)
-        elif cmd == zentlib.CMD_CALIBRATION:
-            assert n == 6
-            self.calibrating = bool(r[4])
-            self.calibration_log.append(self.calibrating)
         elif cmd == zentlib.CMD_SAVE:
             self.saves += 1
             self.flash_profiles[self.active][:] = self.mem_profiles[self.active]
-
-
-def stream_report(length: int, words: list[int]) -> bytes:
-    """A `BE FD` input report with the given length field and u16 payload."""
-    body = bytes([0xBE, 0xFD]) + length.to_bytes(2, "little") + zentlib.pack_u16(words)
-    return body.ljust(zentlib.REPORT_SIZE, b"\x00")
 
 
 @pytest.fixture
@@ -135,7 +117,3 @@ def rig():
     z.close()
     device.close()
 
-
-@pytest.fixture
-def regions():
-    return rammap.REGIONS

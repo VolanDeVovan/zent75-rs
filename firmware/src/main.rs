@@ -2,14 +2,12 @@
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]
 
-//! Track C firmware skeleton for the HOVEY WORKS ZENT75-HE.
+//! Firmware skeleton for the HOVEY WORKS ZENT75-HE.
 //!
-//! This is intentionally minimal: it only proves the toolchain, the memory map
-//! (app linked at 0x80040000 with the TinyUF2 boot signature) and the embassy
-//! runtime all build for the real target. It does NOT yet implement the hall
-//! scan, USB HID or the vendor protocol — those are milestones C2+ in
-//! docs/firmware-plan.md. It must NOT be flashed until an app-independent
-//! recovery path exists (Risk 2).
+//! Proves the toolchain, the memory map (app at 0x80040000 with the boot
+//! signature) and the embassy runtime. Hall scan, USB HID and the protocol are
+//! the next milestones in docs/firmware-plan.md. Before flashing anything read
+//! docs/boot-recovery.md.
 
 use embassy_executor::Spawner;
 use embassy_time::Timer;

@@ -31,7 +31,9 @@ npm run dev        # http://localhost:5173
 npm run build      # type-check + static bundle in dist/ (relative paths, host anywhere)
 npm run preview    # serve dist/
 npm test           # vitest: codec, mock round trips, calibration, config files
+npm run typecheck  # tsc --noEmit over src, tests and scripts
 npm run smoke      # read-only check against the real keyboard from Node
+npm run write-check  # profile-name write + save + restore on the real keyboard
 ```
 
 ### Mock device
@@ -47,7 +49,7 @@ it animates key presses so the live view and the calibration have something to s
 
 ### Linux permissions
 
-The vendor interface is the hidraw node of `36b0:357e` interface 02. Chrome and the smoke script
+The vendor interface is the hidraw node of `36b0:357e` interface 02. Chrome and the Node scripts
 need read/write access to it (udev rule, e.g. mode 0666 for vendor `36b0`). Close the vendor web
 driver first: the replies go to every process that has the node open.
 
@@ -118,7 +120,7 @@ Exit code 0 = OK, 2 = keyboard unavailable (missing node, `ENODEV`, `ETIMEDOUT`,
 replies), 1 = anything else.
 
 Recorded run, 2026-11-24, firmware 0.0.18 (the profile name and the stray `writeAck` come from
-the firmware track's restore test that was running on the same hidraw node at that moment):
+`tools/restore.py --selftest`, which was running on the same hidraw node at that moment):
 
 ```
 device      /dev/hidraw7 (Wob Lab ZENT  75 HE)
@@ -160,9 +162,9 @@ SMOKE OK
 
 ## Not verified yet
 
-- **Writes on the real keyboard.** Every write path (RAM writes, save, profile switch,
-  calibration mode, reset, reboot, bootloader) is tested against the mock only; the real board
-  has so far seen read-only commands from this code.
+- **Most write paths on the real keyboard.** Only a profile-name RAM write and save have run
+  against hardware from this code (see "Hardware write check"). Profile switch, calibration
+  mode, reset, reboot and bootloader are tested against the mock only.
 - **WebHID in a real Chromium against the real keyboard.** The UI was driven end to end in
   headless Chrome with the mock; the WebHID transport itself (device chooser, `sendReport`,
   `inputreport`) has not been exercised with hardware.

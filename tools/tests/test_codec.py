@@ -15,7 +15,7 @@ def test_crc16_vectors(data, crc):
     assert zl.crc16(data) == crc
 
 
-def test_simple_frames_match_readme():
+def test_simple_frames():
     assert zl.encode_simple(zl.CMD_HEARTBEAT) == bytes.fromhex("be000500ed")
     assert zl.encode_simple(zl.CMD_SAVE) == bytes.fromhex("be020500ed")
     assert zl.encode_simple(zl.CMD_SERIAL) == bytes.fromhex("be1d0500ed")
@@ -78,7 +78,7 @@ def test_data_frame_round_trip(n):
     padded = frame.ljust(zl.REPORT_SIZE, b"\x00")
     f = zl.decode_data_frame(padded)
     assert f == zl.DataFrame(zl.CMD_READ_RAM, 0x80080B00, n, data)
-    # README slicing: data at [10:L-3], crc at [L-3:L-1]
+    # vendor-driver slicing: data at [10:L-3], crc at [L-3:L-1]
     L = padded[2] | padded[3] << 8
     assert padded[10:L - 3] == data
     assert int.from_bytes(padded[L - 3:L - 1], "little") == zl.crc16(padded[:L - 3])

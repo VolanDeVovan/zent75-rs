@@ -1,18 +1,15 @@
 node_modules/
 dist/
 target/
-*.rep/
-*.gpr
-ghidra_proj/
-re/out/
-re/cache/
 __pycache__/
 *.pyc
 .vite/
 .direnv/
 *.log.tmp
 
-# Track C firmware: generated artifacts (firmware/target/ is covered by target/
-# above; firmware/vendor/*.uf2 stay committed as the vendor baseline).
+# firmware build artifacts (firmware/target/ is covered by target/ above;
+# firmware/vendor/*.uf2 stay committed as the original images).
 /firmware/zent75-rs.uf2
 /firmware/*.bin
+.pytest_cache/
+.ruff_cache/

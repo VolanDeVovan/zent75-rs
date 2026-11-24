@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Raw-HID codec and transport for the ZENT75-HE stock firmware (USB 36b0:357e, interface 2).
 
-Frame format (README.md, "Protocol"; mirrors panel/src/protocol/zent/frames.ts)
+Frame format (docs/protocol.md; mirrors panel/src/protocol/zent/frames.ts)
 ------------------------------------------------------------------------------
 Every frame is ``BE <cmd> <len LE16> ... ED``, zero-padded to a 1024-byte report. ``len``
 counts the whole frame including ``BE`` and ``ED``. The interface uses unnumbered reports,
@@ -293,7 +293,7 @@ def wait_device(timeout: float = 30.0, iface: int = RAW_HID_INTERFACE) -> Option
 class Zent:
     """Blocking request/reply transport on the vendor raw-HID interface.
 
-    Reads and writes are confined to the README RAM map (``rammap``) because requests at
+    Reads and writes are confined to the known RAM map (``rammap``) because requests at
     unmapped addresses have hung the stock firmware; pass ``unchecked=True`` to lift that.
     """
 

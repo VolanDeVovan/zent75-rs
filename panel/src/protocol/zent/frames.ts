@@ -31,7 +31,6 @@ export const Cmd = {
   Calibration: 0xfe,
   Reboot: 0xff,
 } as const;
-export type CmdCode = (typeof Cmd)[keyof typeof Cmd];
 
 /** Header (4) + address (4) + length (2) + crc (2) + ED (1). */
 export const DATA_FRAME_OVERHEAD = 13;
