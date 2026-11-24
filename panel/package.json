@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/device-smoke.ts"
+    "smoke": "tsx scripts/device-smoke.ts",
+    "write-check": "tsx scripts/device-write-check.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

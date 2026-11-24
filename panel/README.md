@@ -168,3 +168,10 @@ SMOKE OK
   `inputreport`) has not been exercised with hardware.
 - The 1003-byte calibration stream variant is implemented from the vendor code and tested with
   the mock; it has not been captured from the real board.
+
+## Hardware write check
+
+`npm run write-check` drives the panel's own `KeyboardProtocol` stack over the Node hidraw
+transport to prove edit+save+restore on the real keyboard, touching only a profile name and
+putting it back (verified byte-identical). `--mock` runs the same path against the mock.
+Verified 2026-11-24: names `main/game/empty/empty`, write+save+restore byte-identical.
