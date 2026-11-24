@@ -6,10 +6,12 @@ confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootlo
 
 ## Determinable only with physical access
 
-- **Exact MCU part and package.** Narrowed to **HPM5361, QFN48 (`HPM5361ICB1`)** from the datasheet
-  (16 analog pins total, 8 bonded on QFN48) and the scan's 8 sense lines (`hardware.md §1`). HPM5361
-  vs a pin-compatible `HPM53x1ICB1` sibling, and the package for certain, can only be confirmed by
-  **reading the die silkscreen** — open the case.
+- **Exact MCU part and package.** Narrowed to **a QFN48 HPM5361-class part (`HPM5361IEG1`)** from the
+  datasheet (16 analog pins total, 8 bonded on QFN48; package-suffix decode `EG` = QFN48, `CB` =
+  LQFP100, `CF` = LQFP64) and the scan's 8 sense lines (`hardware.md §1`). The exact functional SKU
+  (HPM5361 full / HPM5331 motion / HPM5321 comms — all 2-ADC, same die/pinout, indistinguishable from
+  firmware) and the package for certain can only be confirmed by **reading the die silkscreen** — open
+  the case. (HPM5301 is ruled out: it has only ADC0, but the firmware drives both ADC0 and ADC1.)
 - **Analog multiplexer chip and its select lines.** The scan uses 8 sense lines (4→ADC0, 4→ADC1)
   stepped through 11 positions; the step is driven by a GPTMR1 pulse (`FUN_ram_00015250`), and there
   are **no steady-state GPIO writes to the select lines** in the firmware, so the mux-select pins and

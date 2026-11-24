@@ -47,6 +47,25 @@ I = industrial −40…105 °C, PP = package (**CB** = 14×14 LQFP100, **CF** = 
 **EG** = 6×6 QFN48). Our board is an `…EG1` (QFN48). GPIO counts: 56 / 36 / **29** for
 LQFP100 / LQFP64 / QFN48.
 
+### Memory and flash layout
+
+ILM and DLM are both local RAM; the stock firmware copies most code from XIP flash into ILM at boot
+through a SEGGER runtime-init table (`re/segger_init.py`; `sp = 0x000A0000` = top of DLM). Flash map
+(verified against `re/uf2.py` and the SDK linker scripts):
+
+| Region | Address | Notes |
+|---|---|---|
+| Boot / `nor_cfg_option` | `0x80000000` | XPI NOR flash config |
+| **TinyUF2 bootloader** | `0x80020000` | SDK reserves `0x20000`; the vendor reserves `0x40000` (see `bootloader.md`) |
+| **Application** | `0x80040000` | word0 = `0x0b4d5475` boot signature; entry `0x80040004` |
+| Application end | 0.0.18: `0x80052900`; 0.0.9: `0x80052200` | from `re/uf2.py` |
+| **Config bank 1** (board-global) | `0x80070000` | top/bot/keytype/version/profile/names; shadow ILM `0x7084` |
+| **Config bank 2** (active profile) | `0x80080000` | keymaps, actuation, RGB, DKS…; shadow ILM `0x658` |
+
+The vendor `.uf2` writes only `0x80040000..0x80052900`, so the two config banks survive a reflash
+(verified byte-identical). UF2 family id = `0x0b4d5475` (vendor-private). Both banks are mirrored into
+RAM shadows addressed by `BE 03`/`BE 04` — see `protocol.md`.
+
 ## 2. Peripherals in use
 
 Base addresses resolved against `re/cache/hpm_sdk/soc/HPM5300/HPM5361/HPM5361_svd.xml`. All appear
@@ -109,7 +128,11 @@ down needs a logic analyzer / schematic — see `open-questions.md`.
 (step-ordered), then remapped to the 83 README key indices (Esc=0 … Right=82) by the permutation
 tables at `0x80040528` (88 bytes, scan-slot → key) and `0x80040580` (88 bytes, used to emit the
 `BE FD` stream in key order). Values 83…87 in those tables are the 5 spare slots. Example table-0
-head: `76,53,81,27,20,17,59,49,…` (slot 0 carries key 76 = Space).
+head: `76,53,81,27,20,17,59,49,…` (slot 0 carries key 76 = Space). The per-key working arrays
+(baseline, span, travel; see `algorithms.md`) are indexed by **scan slot** throughout the tick and
+only remapped to key index when a `BE FD` frame or a HID report is built.
+
+Resting ADC ≈ 30000 counts, bottom-out ≈ 18000 (≈1 count ≈ 7.5 µm over a ~3.4 mm switch).
 
 ## 4. RGB lighting
 
