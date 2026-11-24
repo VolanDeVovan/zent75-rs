@@ -8,8 +8,8 @@ structurally identical where noted.
 
 ## 1. MCU
 
-**HPMicro HPM5300-family RISC-V, almost certainly the HPM5361 (2-ADC die), in a QFN48 or LQFP64
-package.**
+**HPMicro HPM5361 (HPM5300-family RISC-V, 2-ADC die), in a QFN48 package — part `HPM5361ICB1` or a
+pin-compatible `HPM53x1ICB1`.**
 
 Evidence:
 
@@ -42,10 +42,16 @@ Evidence:
   (`re/cache/hpm_sdk/soc/HPM5300/HPM53{61,M1}/hpm_soc_ip.h:373-379`). **This rules out the HPM5301.**
 - HPM5361 and HPM53M1 are indistinguishable from the firmware alone (their `hpm_soc_ip_feature.h`
   differ only by a copyright line). HPM5361 is the mainstream orderable 2-ADC part; HPM53M1 is a
-  later variant with the same peripheral map. Picking between them, and the exact package, needs the
-  silkscreen on the die (see `open-questions.md`). The datasheet's package/analog-pin count (up to
-  16 analog pins on the larger packages, only 8 on QFN48) together with the 8-mux scan below points
-  to a small package, consistent with QFN48/LQFP64.
+  later variant with the same peripheral map, and it is **not listed in the HPM5300 series datasheet**
+  (HPM5300DSV012, which enumerates only HPM5361/5331/5321/5301), so the named part is in the HPM536x
+  family. The datasheet (§1) gives the family as 2 × 16-bit ADC/2MSPS with **16 analog input pins
+  total**, USB2.0 OTG with integrated HS-PHY. Only 8 of those analog pins are bonded out on QFN48;
+  the scan below uses exactly 8 sense lines, which points at **QFN48 specifically** (LQFP64/LQFP100
+  expose more). The ordering-code package suffix confirms the convention `…B1` = QFN48, `…F1` =
+  LQFP64, `…G1` = LQFP100 (HPM5361 ships as `HPM5361ICB1`/`ICF1`/`IEG1`), so the best single
+  identification is **`HPM5361ICB1` (HPM5361, QFN48)** — or a pin-compatible `HPM53x1ICB1` sibling
+  that differs only in flash/security options the firmware does not exercise. The die silkscreen is
+  the only way to be 100 % certain (see `open-questions.md`).
 - **HS USB with built-in PHY**: USB0 at `0xf300c000`, and the descriptors below use a 1024-byte
   interrupt endpoint which is only legal at High Speed.
 
