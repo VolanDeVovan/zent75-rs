@@ -439,12 +439,22 @@ export class ZentStockProtocol implements KeyboardProtocol {
   }
 
   async reboot(): Promise<void> {
-    await this.sendRaw(encodeReboot());
-    await this.disconnect();
+    await this.sendAndLeave(encodeReboot());
   }
 
   async enterBootloader(): Promise<void> {
-    await this.sendRaw(encodeBootloader());
-    await this.disconnect();
+    await this.sendAndLeave(encodeBootloader());
+  }
+
+  /** Send a command after which the device drops off the bus; that disconnect is expected, not an event. */
+  private async sendAndLeave(report: Uint8Array): Promise<void> {
+    if (!this.connected) throw new ProtocolError("not connected");
+    this.connected = false;
+    this.stats.sent++;
+    try {
+      await this.transport.send(report);
+    } finally {
+      await this.disconnect();
+    }
   }
 }

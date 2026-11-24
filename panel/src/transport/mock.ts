@@ -181,7 +181,10 @@ export class MockDevice implements Transport {
     const top = u16le(this.peek(REGIONS.top_value.address, REGIONS.top_value.length));
     const bot = u16le(this.peek(REGIONS.bot_value.address, REGIONS.bot_value.length));
     const types = i16le(this.peek(REGIONS.keytype_code.address, REGIONS.keytype_code.length));
+    // with auto-calibration on, the firmware tracks the real rest level instead of trusting top_value
+    const auto = this.profile[REGIONS.auto_calib_enable.address - PROFILE_BASE] === 1;
     const travel = raw.map((v, k) => {
+      if (auto) top[k] = Math.min(top[k], this.sensorTop[k]);
       const span = top[k] - bot[k];
       if (span <= 0) return 0;
       const f = Math.min(1, Math.max(0, (top[k] - v) / span));
