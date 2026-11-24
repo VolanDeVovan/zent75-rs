@@ -121,10 +121,17 @@ classic A/D pair needs two entries (A→D and D→A).
 4 member keycodes, DKS top/bottom µm, tap/delay/random timings ×8) is documented from the vendor
 side in `panel/PROTOCOL-NOTES.md`.
 
-**Byte 47 ("DKSOriginCover" / "trigger the original key"):** this is parsed into the runtime struct
-in `FUN_ram_0000a6f8` but its exact effect (whether it suppresses or still emits the physical key's
-own code) was **not fully traced** through `FUN_ram_00009d10`; the vendor side itself is ambiguous
-(variable "cover" vs label "trigger"). Left as an open item in `open-questions.md`.
+**Byte 47 ("DKSOriginCover" / "trigger the original key"):** it has (at least) a record-**validity**
+role, now traced: `FUN_ram_00014804` walks a key's four 48-byte records and treats a record as
+unused when `byte[47] == 0xFF` (alongside `action > 2` or a DKS point at `+0x18`/`+0x1a` beyond
+5000 µm), returning whether every record is unused — i.e. `0xFF` is the "empty record" sentinel
+(consistent with the device reading `0xFF` in bytes 34…46 of an unused record). The *behavioural*
+"cover vs trigger the original key" bit is a **derived** flag that `FUN_ram_0000a6f8` computes from
+byte 47 at parse time and stores in the runtime struct; its exact effect in the actuation FSM
+(`FUN_ram_00009d10`) — whether the physical key's own HID code is still emitted while the DKS record
+fires — was **not fully traced**, and the vendor side is itself ambiguous (variable "cover" vs UI
+label "trigger"). The panel handles it conservatively (vendor-label semantics). Residual detail
+tracked in `open-questions.md`.
 
 ## 7. Profiles, save, flash layout
 
