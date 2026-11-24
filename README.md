@@ -113,7 +113,9 @@ Vendor images touch only `0x80040000..0x80052900`, so config banks survive a ref
 `tools/rollback.sh` does flash-stock + restore-config + verify in one command.
 
 ### Flashing custom firmware is GATED
-A running-but-hung custom app can't answer `BE FC`, and the app-independent TinyUF2 reset trigger
-(GPIO / double-tap) is unconfirmed without opening the case (see `docs/open-questions.md`). A
-signature-less *canary* build (omit word0) is auto-rejected by the loader and always recoverable —
-safe for development only. Do not flash a signature-valid custom build until recovery is confirmed.
+The app-independent recovery lever is **confirmed** (device experiment, `tools/confirm_sig_recovery.py`):
+a build whose word0 ≠ `0x0b4d5475` is rejected by TinyUF2, which stays in the UF2 drive on every reset
+— so **signature-less builds are always recoverable without hardware** (safe to flash during dev). A
+running-but-hung *signature-valid* app still can't answer `BE FC`, and the TinyUF2 reset GPIO/double-tap
+trigger for that case is unconfirmed without opening the case (see `docs/open-questions.md`). Do not
+flash a signature-valid custom build until that hardware trigger is confirmed.

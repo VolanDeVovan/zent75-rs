@@ -87,14 +87,22 @@ or custom *application* cannot corrupt the loader.
 Our own firmware may not implement `BE FC`, so we need an entry that does not depend on the
 application.
 
-### What is app-independent and (near-)certain
+### What is app-independent and CONFIRMED
 
-- **Invalid app signature → the loader stays in UF2 mode.** Build custom firmware **without** the
-  `0x0b4d5475` word at `0x80040000` (or deliberately break it) and every reset should land in the
-  TinyUF2 mass-storage drive with no HID, no button, no host software needed. This matches the brief's
-  "a bad app does NOT brick the board as long as `0x80000000..0x8003FFFF` is never written." It
-  assumes the vendor fork kept the stock signature-check behaviour, which is very likely — it changed
-  the signature *value*, not the mechanism, and the stock app boots fine with the new value.
+- **Invalid app signature → the loader stays in UF2 mode. CONFIRMED by device experiment
+  (2026-11-24).** A copy of the stock 0.0.18 app with only word0 (`0x80040000`) changed from
+  `0x0b4d5475` to `0x00000000` was packed as a UF2 (family `0x0b4d5475`, base `0x80040000`) and
+  flashed. The board did **not** boot the app (no `36b0:357e`); it came straight back to the TinyUF2
+  mass-storage drive (`34b7:1001` / `/dev/sda`) with no HID, no button and no host software, and
+  re-flashing stock `0.0.18` restored it with the config untouched (112/112 regions == backup). This
+  proves the vendor fork kept the stock signature-check mechanism (it changed the signature *value*,
+  not the behaviour). Re-runnable proof: `tools/confirm_sig_recovery.py`.
+- **Consequence for custom firmware.** Build custom firmware **without** a valid `0x0b4d5475` word at
+  `0x80040000` and every reset lands in the loader — an app-independent recovery for development
+  builds that needs no hardware. (Note the scope: this forces the loader for a *freshly flashed*
+  signature-less image; it does **not** rescue an already-running signature-*valid* app that hangs —
+  see "signature valid, app broken" below.) This matches the brief's "a bad app does NOT brick the
+  board as long as `0x80000000..0x8003FFFF` is never written."
 - Keep **never writing `0x80000000..0x8003FFFF`** from any custom app. Config writes (`0x80070000+`)
   and vendor-image flashing are safe.
 

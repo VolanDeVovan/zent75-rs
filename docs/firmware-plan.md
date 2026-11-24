@@ -75,14 +75,16 @@ Recommendation: ship (1) first (drop-in), add (2) later if needed.
   1-ms-microframe (bInterval=1) HID example for HPM5300 was not found. Validate at C2; if it can't
   hit 8 kHz, fall back to C (hpm_sdk CherryUSB/TinyUSB samples do 8 kHz) while keeping the Rust app
   logic where possible.
-- **Risk 2 — app-independent bootloader entry (BLOCKER for flashing custom firmware).** `BE FC` is
-  handled by the *application*; a broken custom app can't answer it. Flashing our firmware is allowed
-  **only after** `docs/bootloader.md` establishes an entry that works without the app (TinyUF2's GPIO
-  held at reset / double-reset / backup-register magic, or the MCU ROM ISP via BOOT pins / UART0 /
-  SWD-JTAG). If none is reachable without opening the case, Track C stops before flashing and the
-  physical requirement is listed in `docs/open-questions.md`. (The stock-firmware rollback via
-  `tools/rollback.sh` is already proven, so recovery is safe as long as *some* app that answers BE FC
-  is on the board — but that is exactly what a broken custom build removes.)
+- **Risk 2 — app-independent bootloader entry. PARTIALLY RESOLVED (2026-11-24).** `BE FC` is handled
+  by the *application*; a broken custom app can't answer it. Device experiment
+  (`tools/confirm_sig_recovery.py`) **confirmed** that TinyUF2 refuses an app whose word0 ≠
+  `0x0b4d5475` and stays in the UF2 drive on every reset — an app-independent recovery that needs no
+  hardware. So a **signature-less build can always be recovered**: safe to flash freely during
+  development. What is NOT yet resolved is recovering a **signature-valid app that hangs** (it boots,
+  then can't answer `BE FC`); that needs the TinyUF2 reset GPIO/double-tap trigger or ROM ISP
+  (BOOT/UART0/JTAG), which require opening the case (`docs/open-questions.md`). **Gate:** flash a
+  signature-*valid* custom build only after that hardware trigger is confirmed; until then keep every
+  custom flash signature-recoverable. The stock-firmware rollback via `tools/rollback.sh` is proven.
 - **Risk 3 — exact MCU part & RGB driver.** The PAC feature (`hpm5301` vs `hpm5361`) and the RGB
   driver chip must be confirmed from `docs/hardware.md` before C0 deps and C5 are finalized.
 

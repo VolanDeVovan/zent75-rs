@@ -21,14 +21,18 @@ confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootlo
   physical matrix.
 - **RGB LED data pin.** Driven by SPI1 MOSI via an IOC pad (func 5, register `0xf40400e8`);
   the exact package pin needs the IOMUX decode against the HPM5361 QFN48 pinout, or probing.
-- **TinyUF2 recovery trigger.** The loader binary at `0x80020000` is not in our dumps and the
-  hpm_sdk `samples/tinyuf2` source is not in this SDK checkout, so whether the vendor fork honours a
-  **reset-time GPIO button** (the EVK uses PA9-low) and/or a **double-tap reset** magic, and on which
-  pad, is undetermined (`bootloader.md §5`). Resolve by **experiment** (double-reset; hold various
-  keys at power-on and watch for the UF2 drive) and, if needed, **open the case** to find a
-  bootloader pad. Also confirm empirically that the "**app without the `0x0b4d5475` signature at
-  `0x80040000` stays in the loader**" recovery (the recommended dev safety net) actually holds on
-  this board before relying on it.
+- **RESOLVED (2026-11-24): the signature-based recovery holds.** Confirmed by device experiment
+  (`tools/confirm_sig_recovery.py`): an app with word0 ≠ `0x0b4d5475` is refused and the board stays
+  in the TinyUF2 drive (`34b7:1001`) on reset — app-independent, no hardware. See `bootloader.md §3`.
+- **STILL OPEN — TinyUF2 recovery trigger for a signature-VALID but hung app.** The signature lever
+  only forces the loader for a *freshly flashed* signature-less image; it does not rescue an
+  already-running signed app that hangs. Whether the vendor fork honours a **reset-time GPIO button**
+  (the EVK uses PA9-low) and/or a **double-tap reset** magic, and on which pad, is still undetermined
+  (the loader binary at `0x80020000` is not in our dumps and `samples/tinyuf2` is not in this SDK
+  checkout). This cannot be settled without the board: a software-only double-reset would need a warm
+  reset while the loader is in its brief window, which the app can't trigger once hung. Resolve by
+  **opening the case** (double-reset button / bootloader pad / hold keys at power-on). Until then,
+  only flash custom builds that can be made signature-invalid for recovery.
 - **Recovery pads to locate and label before any custom flash** (`bootloader.md §5`): UART0 ROM-ISP
   pads **PA00 (TXD) / PA01 (RXD)**, the **BOOT pins PA02/PA03**, and **JTAG PA04–PA08**. Note this is
   a RISC-V core: debug is **JTAG, not SWD**. Whether JTAG is **OTP-locked** on this unit is unknown
@@ -60,6 +64,7 @@ confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootlo
   doing on-device: dump a victim key's live `BE FD` raw range vs its stored `top_value`/`bot_value`
   to quantify how small the real swing is relative to the 31000/17000 default, and confirm the panel
   can flag such keys automatically (stored `top−bot` implausibly large vs the live raw span).
-- **Custom-firmware recovery drill.** Before flashing our own app, run the full drill once: build a
-  signature-less test app, flash it, confirm the board returns to TinyUF2 on reset, then restore the
-  vendor 0.0.18 — closing the loop on `bootloader.md §5`.
+- **Custom-firmware recovery drill — DONE (2026-11-24).** `tools/confirm_sig_recovery.py` ran the
+  full drill: flashed a signature-invalid image, confirmed the board returned to TinyUF2 on reset
+  (app refused), restored vendor 0.0.18 and verified the config byte-identical. Closes the loop for
+  signature-less builds; the signed-but-hung case remains gated on the hardware trigger above.
