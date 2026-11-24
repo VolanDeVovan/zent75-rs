@@ -15,6 +15,17 @@ PROFILE_COUNT = 4
 PROFILE_NAME_SIZE = 64
 BIND_RECORD_SIZE = 48  # bind_key_setting: one DKS / key-group record per key
 
+#: Key index -> legend, row by row (Esc = 0, LShift = 59, LCtrl = 73, Right = 82).
+KEY_NAMES = (
+    "Esc F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 Print Home "
+    "` 1 2 3 4 5 6 7 8 9 0 - = Bksp Del "
+    "Tab Q W E R T Y U I O P [ ] \\ PgUp "
+    "Caps A S D F G H J K L ; ' Enter PgDn "
+    "LShift Z X C V B N M , . / RShift Up End "
+    "LCtrl LWin LAlt Space RAlt FN RCtrl Left Down Right"
+).split()
+assert len(KEY_NAMES) == KEY_COUNT
+
 # Addresses the tools refer to by name.
 TOP_VALUE = 0x80070000
 BOT_VALUE = 0x800700B0
