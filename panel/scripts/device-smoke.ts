@@ -86,7 +86,7 @@ function summarise(cfg: ProfileConfig): void {
     const dks = cfg.advanced.flatMap((a, k) => (a.mode === 2 ? [KEY_LAYOUT[k].name] : []));
     console.log(`advanced    combo keys: ${combo.join(", ") || "none"}; DKS keys: ${dks.join(", ") || "none"}`);
     const a0 = cfg.advanced[0];
-    console.log(`            record of key 0: keys ${a0.keys.join(",")} top ${a0.dksTopUm} bottom ${a0.dksBottomUm} ticks ${a0.tapTicks}/${a0.delayTicks}/${a0.randomTicks} reserved ${a0.reserved.join(",")} keep ${a0.keepOriginal}`);
+    console.log(`            record of key 0: keys ${a0.keys.join(",")} top ${a0.dksTopUm} bottom ${a0.dksBottomUm} ticks ${a0.tapTicks}/${a0.delayTicks}/${a0.randomTicks} reserved ${a0.reserved.join(",")} byte47 ${a0.suppressOriginal}`);
   } else console.log("advanced    not supported by this firmware");
   const l = cfg.lighting;
   console.log(
@@ -102,8 +102,11 @@ async function run(args: Args): Promise<void> {
   let extraWords = 0;
   let lastExtra: number[] = [];
   let variants = new Map<string, number>();
+  const kinds = new Map<string, number>();
   transport.onReport((r) => {
     const f = decodeDeviceFrame(r);
+    const kind = !f ? "not-a-frame" : f.type === "unknown" ? `unknown-cmd-0x${f.cmd.toString(16)}` : f.type === "bad" ? `bad(${f.reason})` : f.type;
+    kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
     if (f?.type === "stream") {
       variants.set(f.variant, (variants.get(f.variant) ?? 0) + 1);
       if (f.variant === "travel") {
@@ -165,6 +168,7 @@ async function run(args: Args): Promise<void> {
     }
     console.log(`stats       sent ${kb.stats.sent}, received ${kb.stats.received}, retries ${kb.stats.retries}, bad frames ${kb.stats.badFrames}` +
       (kb.stats.retried.length ? ` (retried: ${kb.stats.retried.join("; ")})` : ""));
+    console.log(`frames      ${[...kinds].map(([k, n]) => `${k}:${n}`).join(" ")}`);
     console.log("SMOKE OK");
   } finally {
     await kb.disconnect().catch(() => undefined);

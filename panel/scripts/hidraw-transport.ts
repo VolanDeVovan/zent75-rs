@@ -4,8 +4,9 @@
  * write: one report-id byte (0x00) followed by the 1024-byte report
  * read:  one input report per read(); the kernel delivers 1024 bytes (no report-id byte,
  *        because the interface uses unnumbered reports); a 1025-byte form is accepted too.
+ *        The node is opened O_NONBLOCK and polled, so nothing blocks and the script can exit.
  */
-import { closeSync, existsSync, openSync, read, readFileSync, readdirSync, realpathSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, openSync, readFileSync, readSync, readdirSync, realpathSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { Emitter, type DisconnectListener, type ReportListener, type Transport, type TransportInfo } from "../src/protocol/transport";
 import { REPORT_ID, REPORT_SIZE } from "../src/protocol/zent/frames";
@@ -67,6 +68,9 @@ export function findZentHidraw(sysRoot?: string): HidrawCandidate | null {
   return mine.find((c) => c.interfaceNumber === VENDOR_INTERFACE) ?? mine.find((c) => c.vendorUsage) ?? null;
 }
 
+/** how often the node is polled for input reports */
+const POLL_MS = 1;
+
 const GONE = new Set(["ENODEV", "ETIMEDOUT", "EPIPE", "EIO", "ENOENT", "ENXIO", "EPROTO", "ESHUTDOWN"]);
 
 function unavailable(e: unknown, what: string): Error {
@@ -80,6 +84,8 @@ export class HidrawTransport implements Transport {
   readonly info: TransportInfo;
   isOpen = false;
   private fd = -1;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly buf = Buffer.alloc(REPORT_SIZE + 1);
   private reports = new Emitter<Uint8Array>();
   private disconnects = new Emitter<unknown>();
 
@@ -89,45 +95,49 @@ export class HidrawTransport implements Transport {
 
   async open(): Promise<void> {
     try {
-      this.fd = openSync(this.path, "r+");
+      // Non-blocking: a blocking read() parked in libuv's thread pool cannot be cancelled and
+      // keeps the process from exiting when the keyboard stays silent.
+      this.fd = openSync(this.path, constants.O_RDWR | constants.O_NONBLOCK);
     } catch (e) {
       throw unavailable(e, `open ${this.path}`);
     }
     this.isOpen = true;
-    this.readLoop();
+    this.timer = setInterval(() => this.poll(), POLL_MS);
   }
 
-  private readLoop(): void {
-    const fd = this.fd;
-    const buf = Buffer.alloc(REPORT_SIZE + 1);
-    const next = () => {
-      if (!this.isOpen || this.fd !== fd) return;
-      read(fd, buf, 0, buf.length, null, (err, n) => {
-        if (!this.isOpen || this.fd !== fd) return;
-        if (err) {
-          this.isOpen = false;
-          this.disconnects.emit(unavailable(err, `read ${this.path}`));
-          return;
-        }
-        if (n > 0) this.reports.emit(Uint8Array.from(buf.subarray(0, n)));
-        next();
-      });
-    };
-    next();
-  }
-
-  async close(): Promise<void> {
+  /** Drain every report the kernel has queued. */
+  private poll(): void {
     if (!this.isOpen) return;
+    for (let i = 0; i < 64; i++) {
+      let n: number;
+      try {
+        n = readSync(this.fd, this.buf, 0, this.buf.length, null);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EAGAIN") return;
+        this.shutdown();
+        this.disconnects.emit(unavailable(e, `read ${this.path}`));
+        return;
+      }
+      if (n <= 0) return;
+      this.reports.emit(Uint8Array.from(this.buf.subarray(0, n)));
+    }
+  }
+
+  private shutdown(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
     this.isOpen = false;
     const fd = this.fd;
     this.fd = -1;
-    // A read() may still be parked in the thread pool; closing the fd is fine on Linux,
-    // the caller ends the process afterwards.
     try {
-      closeSync(fd);
+      if (fd >= 0) closeSync(fd);
     } catch {
       /* already gone */
     }
+  }
+
+  async close(): Promise<void> {
+    if (this.isOpen) this.shutdown();
   }
 
   async send(report: Uint8Array): Promise<void> {
@@ -136,10 +146,18 @@ export class HidrawTransport implements Transport {
     const out = Buffer.alloc(REPORT_SIZE + 1);
     out[0] = REPORT_ID;
     out.set(report, 1);
-    try {
-      writeSync(this.fd, out);
-    } catch (e) {
-      throw unavailable(e, `write ${this.path}`);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        writeSync(this.fd, out);
+        return;
+      } catch (e) {
+        // EAGAIN: the kernel's output queue is momentarily full
+        if ((e as NodeJS.ErrnoException).code === "EAGAIN" && attempt < 50) {
+          await new Promise((r) => setTimeout(r, 2));
+          continue;
+        }
+        throw unavailable(e, `write ${this.path}`);
+      }
     }
   }
 

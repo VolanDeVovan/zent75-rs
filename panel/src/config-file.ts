@@ -69,7 +69,7 @@ function validateAdvanced(value: unknown, path: string): AdvancedKey {
     delayTicks: int(a.delayTicks, `${path}.delayTicks`, 0, 65535),
     randomTicks: int(a.randomTicks, `${path}.randomTicks`, 0, 65535),
     reserved: intArray(a.reserved, `${path}.reserved`, 13, 0, 255),
-    keepOriginal: int(a.keepOriginal, `${path}.keepOriginal`, 0, 255),
+    suppressOriginal: int(a.suppressOriginal, `${path}.suppressOriginal`, 0, 255),
   };
 }
 

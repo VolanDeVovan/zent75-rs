@@ -134,7 +134,7 @@ describe("ZentStockProtocol against the mock", () => {
     const { dev, kb } = await setup();
     const cfg = await kb.readConfig();
     const next = cloneConfig(cfg);
-    next.advanced![57] = { ...next.advanced![57], mode: ADV_COMBO, keys: [-8, -7, 41, KEYCODE_EMPTY], keepOriginal: 0 };
+    next.advanced![57] = { ...next.advanced![57], mode: ADV_COMBO, keys: [-8, -7, 41, KEYCODE_EMPTY], suppressOriginal: 0 };
     next.advanced![46] = {
       ...next.advanced![46], mode: ADV_DKS, actions: [[2, 0, 0, 0], [0, 1, 1, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
       keys: [4, -7, KEYCODE_EMPTY, KEYCODE_EMPTY], dksTopUm: 800, dksBottomUm: 3200, tapTicks: 16, delayTicks: 8, randomTicks: 0,

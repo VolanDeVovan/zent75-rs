@@ -113,7 +113,7 @@ describe("bind_key_setting record (48 bytes)", () => {
       keys: [26, -7, KEYCODE_EMPTY, 44],
       dksTopUm: 1000, dksBottomUm: 3000,
       tapTicks: 8 * 5, delayTicks: 8 * 2, randomTicks: 8 * 1,
-      keepOriginal: 1,
+      suppressOriginal: 1,
     };
     const b = Array.from(encodeAdvancedKey(key));
     expect(b.length).toBe(BIND_RECORD_SIZE);

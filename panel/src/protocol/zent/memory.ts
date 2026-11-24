@@ -178,7 +178,7 @@ export function encodeProfileName(name: string): Uint8Array {
  * 30..31  u16 delay          (UI value * 8)
  * 32..33  u16 random delay   (UI value * 8)
  * 34..46  13 bytes, written as 0xFF
- * 47      0 = cover (suppress) the key's own code, 1 = keep it
+ * 47      "trigger the original key" switch of the vendor UI, inverted: 0 = on, 1 = off (default)
  */
 export function decodeAdvancedKey(rec: ArrayLike<number>, mode: number): AdvancedKey {
   if (rec.length !== BIND_RECORD_SIZE) throw new RangeError(`bind record must be ${BIND_RECORD_SIZE} bytes`);
@@ -196,7 +196,7 @@ export function decodeAdvancedKey(rec: ArrayLike<number>, mode: number): Advance
     delayTicks: w[3],
     randomTicks: w[4],
     reserved: b.slice(34, 47),
-    keepOriginal: b[47],
+    suppressOriginal: b[47],
   };
 }
 
@@ -212,7 +212,7 @@ export function encodeAdvancedKey(key: AdvancedKey): Uint8Array {
   out.set(packU16([key.dksTopUm, key.dksBottomUm, key.tapTicks, key.delayTicks, key.randomTicks], "dks"), 24);
   expectLength(key.reserved, 13, "reserved");
   out.set(packU8(key.reserved, "reserved"), 34);
-  out[47] = packU8([key.keepOriginal], "keepOriginal")[0];
+  out[47] = packU8([key.suppressOriginal], "suppressOriginal")[0];
   return out;
 }
 
@@ -228,7 +228,7 @@ export function emptyAdvancedKey(): AdvancedKey {
     delayTicks: 24,
     randomTicks: 16,
     reserved: new Array(13).fill(0xff),
-    keepOriginal: 1,
+    suppressOriginal: 1,
   };
 }
 

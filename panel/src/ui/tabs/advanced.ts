@@ -26,7 +26,7 @@ function loadDraft(app: App, key: number): void {
     if (d.tapTicks < 8 || d.tapTicks > 400) d.tapTicks = 8;
     if (d.delayTicks > 80) d.delayTicks = 0;
     if (d.randomTicks > 80) d.randomTicks = 0;
-    if (d.keepOriginal > 1) d.keepOriginal = 1;
+    if (d.suppressOriginal > 1) d.suppressOriginal = 1;
   }
   app.ui.advDraft = d;
 }
@@ -91,7 +91,7 @@ function renderCombo(app: App, key: number | null, d: AdvancedKey | null): HTMLE
           h("span", { class: "field-label" }, `Key ${i + 1}`),
           keySelect(code, (v) => (d.keys[i] = v), !!app.busy),
         ))),
-        toggle("Also send the key's own keymap code", d.keepOriginal === 1, (v) => (d.keepOriginal = v ? 1 : 0),
+        toggle("Also send the key's own keymap code", d.suppressOriginal === 0, (v) => (d.suppressOriginal = v ? 0 : 1),
           "off = the group replaces the key's normal function"),
         h("div", { class: "row end" },
           h("button", { class: "btn", disabled: !!app.busy, onclick: () => clearAdvanced(app, key) }, "Remove binding"),
@@ -154,7 +154,7 @@ function renderDks(app: App, key: number | null, d: AdvancedKey | null): HTMLEle
       ),
       h("div", { class: "col" },
         section("Original key",
-          toggle("Also send the key's own keymap code", d.keepOriginal === 1, (v) => (d.keepOriginal = v ? 1 : 0)),
+          toggle("Also send the key's own keymap code", d.suppressOriginal === 0, (v) => (d.suppressOriginal = v ? 0 : 1)),
           h("div", { class: "row end" },
             h("button", { class: "btn", disabled: !!app.busy, onclick: () => clearAdvanced(app, key) }, "Remove binding"),
             h("button", {

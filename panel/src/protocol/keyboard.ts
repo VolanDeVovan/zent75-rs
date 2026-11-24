@@ -49,8 +49,13 @@ export interface AdvancedKey {
   randomTicks: number;
   /** 13 bytes the vendor driver always writes as 0xFF */
   reserved: number[];
-  /** last byte: 0 = the key's own keymap code is suppressed ("cover original"), 1 = it is still sent */
-  keepOriginal: number;
+  /**
+   * last byte, as written by the vendor driver's "Trigger the original key" switch:
+   * 0 = switch on (the key's own keymap code is sent as well), 1 = switch off (default).
+   * Taken from the UI label; the driver's variable is called DKSOriginCover, so treat the
+   * exact firmware behaviour as unverified.
+   */
+  suppressOriginal: number;
 }
 
 export interface Lighting {
