@@ -154,3 +154,25 @@ the ultimate recovery, but it requires soldering/probing pads inside the case.
 Before flashing any custom firmware: locate and label the UART0 pads, the PA02/PA03 BOOT pins and the
 JTAG pads, and confirm by experiment whether a GPIO/double-tap loader trigger exists (tracked in
 `open-questions.md`).
+
+## 7. Boot chain recovered from flash dumps (2026-11-24, later)
+
+Dumped with a temporarily flashed 0.0.18 build whose `BE 04` bank-2 read path had its source base
+changed (`lui a1,0x7ff80` at ILM `0xbcbe` → `0xfff90` / `0xfff7f`; 2–3 literal bytes in the
+SEGGER-LZ stream, emulation-verified as the only ILM change), read in 128-byte chunks, two identical
+passes plus a known-app cross-check; stock 0.0.18 + config restored right after (`rollback.sh`).
+Images (vendor code, do not publish): `re/out/loader/stage0_80000000.bin`,
+`re/out/loader/loader_80020000.bin`. (`BE 01` is unusable: it hangs stock 0.0.18 even in range.)
+
+- `0x80001000`: HPM boot header → **stage 0 at `0x80003000`** ("ZentBOOT", TinyUF2 0.9.0, built
+  Sep 12 2024, vendor path `D:\ZentPro\zent75\...\soc\HPM5361\` — confirms the HPM5361).
+- `0x80020000`: "Zent_DLD" download loader (what `BE FC` jumps to); its `main` goes straight to DFU.
+- Stage-0 decision `0x8000c008`: if the download loader's word0 ≠ `0x0b4d5475` → stage-0's own DFU;
+  else if **key check** `0x8000b6f8` → jump `0x80020004`; else if app word0 valid → jump
+  `0x80040004`; else → jump download loader.
+- **Key check** (`0x8000b6f8`): drives the mux address on **PY00–PY03 by software** (PGPIO
+  `0xf411c1e4/1e8` set/clear; step addresses 1,2,3,4,5,9,10,11,12,13,14), ADC channels
+  1,2,3,4,5,6,7,11, 5-pass average of all 88 slots. Pressed if, for **scan slot 54**,
+  `d = |v−0x8000|` ≥ 2001 and `d > 3 × mean(|v−0x8000|)` over the other valid slots
+  (`0x1964 ≤ v ≤ 0xe69b`). Slot 54 → key index 47 = **S** (via table `0x80040528`).
+  ⇒ **Hold S while plugging in → UF2 bootloader, independent of the app.** (To confirm on hardware.)
