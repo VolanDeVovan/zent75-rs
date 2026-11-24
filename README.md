@@ -88,3 +88,32 @@ indices go row by row: Esc = 0, LShift = 59, LCtrl = 73, RCtrl = 79, Right = 82.
 - 2026-11-24: LCtrl/LShift went dead (sensor fine, firmware travel ~0). LShift came back after a
   recalibration and a replug, LCtrl only after a second replug. Indices 59/73 now hold measured
   calibration instead of 31000/17000.
+
+## Project status (2026-11-24)
+
+Reverse-engineering, a configurator panel, and a firmware plan are done; custom-firmware flashing is
+intentionally still gated (see below). The keyboard is on stock 0.0.18 with the user's config intact.
+
+- **MCU**: HPMicro **HPM5361** (QFN48, part HPM5361IEG1 / HPM53x1IEG1), RV32IMAFDC, XIP flash @0x80000000,
+  TinyUF2 bootloader @0x80020000, application @0x80040000 (boot signature word0 = `0x0B4D5475`).
+- **docs/**: `hardware.md`, `protocol.md`, `algorithms.md`, `bootloader.md`, `stable-vs-latest.md`,
+  `open-questions.md`, `firmware-plan.md` — all evidence-cited to function addresses in the disassembly.
+- **re/**: re-runnable analysis (`uf2.py`, `segger_init.py`, Ghidra headless `ghidra/run.sh`, `fn.sh`,
+  function matcher). Ghidra output under `re/out/` is gitignored.
+- **tools/**: `zentlib.py` (+`rammap.py`) raw-HID library, `dump_all.py`, `restore.py`, `flash_uf2.py`,
+  `rollback.sh` (autonomous recovery), unit tests in `tools/tests/` (48 pass).
+- **backups/**: full config dump of all 4 profiles with sha256 + the verified rollback log.
+- **panel/**: TypeScript + Vite WebHID configurator (97 tests pass; verified reading, editing, saving
+  and restoring on the real keyboard via the shared codec).
+- **firmware/**: compiling Rust skeleton (hpm-hal/embassy, `riscv32imafc`) + `vendor/` stock images.
+
+### Rollback gate — PASSED (autonomous, no replug)
+`BE FC` → TinyUF2 mass-storage (USB `34B7:1001`, `/dev/sda`) → flash a `.uf2` → auto-reboot to app.
+Vendor images touch only `0x80040000..0x80052900`, so config banks survive a reflash.
+`tools/rollback.sh` does flash-stock + restore-config + verify in one command.
+
+### Flashing custom firmware is GATED
+A running-but-hung custom app can't answer `BE FC`, and the app-independent TinyUF2 reset trigger
+(GPIO / double-tap) is unconfirmed without opening the case (see `docs/open-questions.md`). A
+signature-less *canary* build (omit word0) is auto-rejected by the loader and always recoverable —
+safe for development only. Do not flash a signature-valid custom build until recovery is confirmed.
