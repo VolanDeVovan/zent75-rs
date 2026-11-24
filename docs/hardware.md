@@ -128,10 +128,14 @@ There are only 8 analog pins on the QFN48, so the keys are time-multiplexed.
 
 So one full scan = **11 mux positions × 2 ADCs × 4 pins = 88 slots** (83 keys + 5 spare). The analog
 mux select advances one position per step. **Which pins drive the mux select is not cleanly in the
-binary** — the advance is done inside `FUN_ram_00015250` (a `GPTMR1` reload: set `0x4000`, clear,
-set `0x400`) with no explicit per-step GPIO write visible; the four `PIOC` pads at
-`0xf4118e00/e08/e10/e18` (set to `3` once at init) are the most likely select lines. Pinning this
-down needs a logic analyzer / schematic — see `open-questions.md`.
+binary** — the advance is done inside `FUN_ram_00015250` (a `GPTMR1` reload at `0xf0004000`: set `0x4000`,
+clear, set `0x400`) with no explicit per-step GPIO write visible. The **four `PIOC` pads set to GPIO
+once at init** (`FUN_ram_00015c3a`, writing `3` to `0xf4118e00/e08/e10/e18`) decode to pad indices
+448–451 = **PY00, PY01, PY02, PY03** (func 3 = `SOC_GPIO_Y`, verified against `hpm_ioc_regs.h`): four
+power-domain GPIOs = the most likely **4-bit mux address lines** (4 bits → 16 positions, 11 used).
+Whether they are driven per-step by software PGPIO writes or by `GPTMR1` hardware, and the mux IC they
+feed (74HC4067-class, per the Rainy75-HE sibling), still need a logic analyzer / schematic — see
+`open-questions.md`.
 
 **Slot → key mapping.** The 88 raw slots are averaged by `FUN_ram_00013314` into `0x8008ee28`
 (step-ordered), then remapped to the 83 README key indices (Esc=0 … Right=82) by the permutation

@@ -16,8 +16,8 @@ confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootlo
   from the binary — **PB00, PB01, PB08–PB13**, set to analog mode by `FUN_ram_00015f08` (channels
   0–7; `hardware.md §3`). What remains is the mux IC and its **select** lines: the scan steps 8 sense
   lines through 11 positions, driven by a GPTMR1 pulse (`FUN_ram_00015250`), with **no steady-state
-  GPIO writes to the select lines** in the firmware. The four `PIOC` pads at `0xf4118e00/e08/e10/e18`
-  (set to func `3` once at init) are the most likely select lines, but the mux IC itself (the
+  GPIO writes to the select lines** in the firmware. The four `PIOC` pads at `0xf4118e00/e08/e10/e18` = **PY00–PY03**
+  (func `3` = SOC_GPIO_Y, set once in `FUN_ram_00015c3a`) are the most likely 4-bit address lines, but the mux IC itself (the
   Rainy75-HE sibling reportedly uses Nexperia 74HC4067-class 16:1 parts) and the pad→mux-input wiring
   need the **schematic or a logic analyzer**, plus continuity to confirm the `0x80040528`/`0x80040580`
   scan-order tables against the physical matrix.
