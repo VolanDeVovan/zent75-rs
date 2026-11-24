@@ -26,15 +26,16 @@ confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootlo
 - **RESOLVED (2026-11-24): the signature-based recovery holds.** Confirmed by device experiment
   (`tools/confirm_sig_recovery.py`): an app with word0 ≠ `0x0b4d5475` is refused and the board stays
   in the TinyUF2 drive (`34b7:1001`) on reset — app-independent, no hardware. See `bootloader.md §3`.
-- **STILL OPEN — TinyUF2 recovery trigger for a signature-VALID but hung app.** The signature lever
-  only forces the loader for a *freshly flashed* signature-less image; it does not rescue an
-  already-running signed app that hangs. Whether the vendor fork honours a **reset-time GPIO button**
-  (the EVK uses PA9-low) and/or a **double-tap reset** magic, and on which pad, is still undetermined
-  (the loader binary at `0x80020000` is not in our dumps and `samples/tinyuf2` is not in this SDK
-  checkout). This cannot be settled without the board: a software-only double-reset would need a warm
-  reset while the loader is in its brief window, which the app can't trigger once hung. Resolve by
-  **opening the case** (double-reset button / bootloader pad / hold keys at power-on). Until then,
-  only flash custom builds that can be made signature-invalid for recovery.
+- **STILL OPEN — which pad is the TinyUF2 reset-time GPIO trigger (for a signature-VALID hung app).**
+  The signature lever only forces the loader for a *freshly flashed* signature-less image; it does not
+  rescue an already-running signed app that hangs. The *mechanism* is now known from the TinyUF2 source
+  (`hpm_sdk/samples/tinyuf2`, `bootloader.md §5`): one **active-high GPIO sampled at reset** (held high
+  → app, pulled low → DFU) plus the signature check — and **double-tap is ruled out** (this HPM port
+  has no no-init-RAM magic). What remains is **which physical pad the vendor wired as that trigger and
+  whether it is accessible** — the loader binary at `0x80020000` is not in any software-reachable dump
+  (`BE 01` validates only `0x80080000..0x80100000`; ROM ISP / JTAG need the pads below). Needs the
+  **case opened** to find/probe the pad. Until then, only flash custom builds that can be made
+  signature-invalid for recovery.
 - **Recovery pads to locate and label before any custom flash** (`bootloader.md §5`): UART0 ROM-ISP
   pads **PA00 (TXD) / PA01 (RXD)**, the **BOOT pins PA02/PA03**, and **JTAG PA04–PA08**. Note this is
   a RISC-V core: debug is **JTAG, not SWD**. Whether JTAG is **OTP-locked** on this unit is unknown

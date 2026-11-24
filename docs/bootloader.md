@@ -106,16 +106,29 @@ application.
 - Keep **never writing `0x80000000..0x8003FFFF`** from any custom app. Config writes (`0x80070000+`)
   and vendor-image flashing are safe.
 
-### What needs the loader's own trigger (not determinable from our data)
+### The loader's reset-time trigger — mechanism now known from the TinyUF2 source
 
-The stock EVK (`boards/hpm5301evklite`, `README_en.rst:140-152`, `board.h:151-152`) uses a reset-time
-GPIO: **`BOARD_BUTTON_TINYUF2_PIN = 9` → PA9 held LOW at reset keeps the board in the loader** ("PA9
-connect GND, and press reset, board enter DFU mode"). Standard TinyUF2 also supports a **double-tap
-reset** (a magic such as `0xf01669ef` in no-init RAM). **Whether the vendor fork keeps a reset GPIO
-(and on which pad), and whether double-tap is enabled, cannot be read from our data** — the loader
-binary is not in the dumps (the `.uf2` starts at `0x80040000`) and the TinyUF2 sample source is not
-in this SDK checkout. These must be found by experiment (try double-reset; try holding keys at
-power-on) or by opening the case.
+The HPM TinyUF2 port this loader is forked from is `hpm_sdk/samples/tinyuf2` (BSD-3-Clause). Its
+`check_dfu_mode()` (`src/main.c:104`) enters DFU when **either** the GPIO trigger fails **or** the
+app signature is invalid:
+
+```
+if (!uf2_board_enter_bootloader()) return true;   // GPIO not "active" at reset  -> DFU
+if (!uf2_board_app_valid())        return true;   // word0 != BOARD_UF2_SIGNATURE -> DFU
+return false;                                      // else jump to app (APP_START+4)
+```
+
+`uf2_board_enter_bootloader()` (`src/board_api.c:159`) samples one GPIO `UF2_BOOTLOADER_SAMPLE_COUNT`
+(=10) times over ~100 ms and returns "stay in app" only if the pin reads `UF2_BOOTLOADER_PIN_ACTIVE`
+(=**1**, active-high) for >60 % of samples. So the pin is **normally held high → boot the app; pull it
+low at reset → DFU** (matching the EVK note "PA9 to GND + reset → DFU"; the EVK uses
+`BOARD_BUTTON_TINYUF2_PIN`). **Primary-source finding: this HPM port has NO double-tap / no-init-RAM
+magic at all** — the ONLY triggers are this one GPIO and the signature check. `uf2_board_dfu_complete`
+is `ppor_sw_reset(HPM_PPOR, 10)` (matches the observed auto-reset after flashing); the app jump is to
+`APP_START+4` (matches entry `0x80040004`). **What is still unknown for THIS board:** which physical
+pad the vendor fork wired as the trigger and whether it is accessible (a key/pad/test-point) — the
+loader binary itself is not in our dumps (the `.uf2` starts at `0x80040000`). That one fact needs the
+case opened; double-tap no longer needs investigating (ruled out by the source).
 
 ### Guaranteed hardware fallback (physical access)
 
