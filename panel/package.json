@@ -1,0 +1,23 @@
+{
+  "name": "zent75-panel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WebHID configurator for the HOVEY WORKS ZENT75-HE hall-effect keyboard",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/device-smoke.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/w3c-web-hid": "^1.0.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}
