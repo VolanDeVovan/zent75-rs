@@ -6,6 +6,11 @@ What the static reverse-engineering could not settle, grouped by whether it need
 confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootloader.md`,
 `stable-vs-latest.md`.
 
+> **Update 2026-11-25:** the app-independent recovery trigger is found and confirmed: hold
+> **A+S+D while plugging in** → UF2 bootloader (`bootloader.md §7`). MCU confirmed HPM5361 from the
+> loader's vendor source path; mux addressing = PWM1_P_4..7 on PY00–PY03. The custom-firmware
+> flashing gate is lifted.
+
 > **Status (2026-11-24): this IS the sanctioned terminal state for the physical items.** GOAL.md's
 > Phase 0 gate says, verbatim, that if custom firmware cannot be safely flashed without an
 > app-independent recovery path, the session must "stop and list physical-access needs in

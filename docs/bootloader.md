@@ -174,5 +174,12 @@ Images (vendor code, do not publish): `re/out/loader/stage0_80000000.bin`,
   `0xf411c1e4/1e8` set/clear; step addresses 1,2,3,4,5,9,10,11,12,13,14), ADC channels
   1,2,3,4,5,6,7,11, 5-pass average of all 88 slots. Pressed if, for **scan slot 54**,
   `d = |v−0x8000|` ≥ 2001 and `d > 3 × mean(|v−0x8000|)` over the other valid slots
-  (`0x1964 ≤ v ≤ 0xe69b`). Slot 54 → key index 47 = **S** (via table `0x80040528`).
-  ⇒ **Hold S while plugging in → UF2 bootloader, independent of the app.** (To confirm on hardware.)
+  (`0x1964 ≤ v ≤ 0xe69b`). Stage-0 step order equals the app's: the app drives PY00–PY03 as
+  `PWM1_P_4..7` (`SOC IOC 0xf4040e00..e18 = 0x11`), and the PWM1 compare set in `FUN_ram_0000ea98`
+  (11 equal steps, `CHCFG` ch4..7 = cmp 0–9 / 10–14 / 15–17 / 18) yields exactly the addresses
+  1,2,3,4,5,9,10,11,12,13,14. Slot 54 = ADC0 ch7 at address 10, i.e. the **A/S/D** neighbourhood
+  (S alone, by table `0x80040528`, did **not** trigger, so the app's step index is offset by one).
+  ⇒ **CONFIRMED on hardware 2026-11-25: hold A+S+D while plugging in → UF2 bootloader
+  (`34b7:1001`), independent of the app.** Several keys held at once still pass the 3×-mean test.
+  Which single key it is (A or D) is untested and not needed. Side effect: keys held at power-up
+  get a pressed baseline in the app (travel stuck at 0) until a clean replug.
