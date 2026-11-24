@@ -1,0 +1,51 @@
+[package]
+name = "zent75-rs"
+version = "0.0.0"
+edition = "2021"
+description = "Track C firmware skeleton for the HOVEY WORKS ZENT75-HE (HPM5300-family RISC-V)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# HPMicro official embedded-Rust HAL. hpm5301 is a subset of hpm5361; the example
+# notes either is fine, and docs/firmware-plan.md picks hpm5361 (safe for any
+# HPM5300-family part on this board). Git dependency pinned to a known-good rev
+# (re/cache is not committed, so no path dep).
+hpm-hal = { git = "https://github.com/hpmicro/hpm-hal", rev = "620f58df241d541d5d5cb1575407a16351da49fd", features = [
+    "rt",
+    "embassy",
+    "hpm5361",
+    "usb-pin-reuse-hpm5300",
+] }
+
+panic-halt = "1.0.0"
+
+riscv = { version = "0.15.0", features = ["critical-section-single-hart"] }
+andes-riscv = "0.1.1"
+
+# Pin the startup/runtime crate. hpm-hal only asks for `^0.3.0`, so the resolver
+# otherwise picks 0.3.5, which bumped to `riscv 0.16` and enables
+# `critical-section-single-hart` on it — while hpm-hal keeps enabling it on
+# `riscv 0.15`. Two riscv majors each exporting the critical-section impl =
+# "symbol `_critical_section_1_0_acquire` multiply defined" at link time.
+# 0.3.1 is the newest hpm-riscv-rt still on `riscv 0.15`, so everything unifies
+# onto a single critical-section implementation.
+hpm-riscv-rt = "=0.3.1"
+
+embedded-hal = "1.0.0"
+
+embassy-time = { version = "0.5.0", features = ["tick-hz-1_000_000"] }
+embassy-executor = { version = "0.9.1", features = [
+    "nightly",
+    "arch-riscv32",
+    "executor-thread",
+] }
+embassy-sync = "0.7.2"
+
+[profile.release]
+# Symbols are not flashed to the microcontroller, so there is no reason to strip
+# them; keeping them helps post-mortem disassembly of our own builds.
+strip = false
+lto = true
+opt-level = "z" # optimize for size
+debug = 2

@@ -1,0 +1,38 @@
+[build]
+target = "riscv32imafc-unknown-none-elf"
+
+[target.riscv32imafc-unknown-none-elf]
+# NOTE: flashing is gated (see firmware/README.md and docs/firmware-plan.md Risk 2).
+# This runner is only used by `cargo run`, which we do NOT use yet. Kept for later.
+runner = [
+    "probe-rs",
+    "run",
+    "--chip",
+    "HPM5361",
+    "--protocol",
+    "jtag",
+]
+
+rustflags = [
+    # Target features: default for imafc is "+m,+a,+c,+f"; add the Zb* bit-manip
+    # extensions the HPM5300 core implements (matches the hpm-hal example).
+    "-C",
+    "target-feature=+zba,+zbb,+zbc,+zbs",
+    # Linker scripts:
+    "-C",
+    "link-arg=-Tmemory.x",     # our memory map (app at 0x80040000)
+    "-C",
+    "link-arg=-Tdevice.x",     # __INTERRUPTS, peripheral interrupt names (hpm-metapac)
+    "-C",
+    # Must precede hpm-link.x: it reassigns `_stext` to ORIGIN+4, and hpm-link.x
+    # evaluates `.text _stext :` at parse time, so the new value has to be in
+    # scope first. (The `.app_signature` INSERT itself is order-independent.)
+    "link-arg=-Tlink-app.x",   # our TinyUF2 boot signature at 0x80040000, entry at +4
+    "-C",
+    "link-arg=-Thpm-link.x",   # hpm-riscv-rt sections
+    "-C",
+    "link-arg=-nmagic",
+]
+
+[unstable]
+build-std = ["core"]

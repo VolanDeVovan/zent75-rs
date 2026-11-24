@@ -11,3 +11,8 @@ __pycache__/
 .vite/
 .direnv/
 *.log.tmp
+
+# Track C firmware: generated artifacts (firmware/target/ is covered by target/
+# above; firmware/vendor/*.uf2 stay committed as the vendor baseline).
+/firmware/zent75-rs.uf2
+/firmware/*.bin
