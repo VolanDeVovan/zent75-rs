@@ -216,17 +216,17 @@ export function encodeAdvancedKey(key: AdvancedKey): Uint8Array {
   return out;
 }
 
-/** What the vendor driver would produce for an unused record. */
+/** An unused record as firmware 0.0.18 holds it after a config reset (read from a real board). */
 export function emptyAdvancedKey(): AdvancedKey {
   return {
     mode: ADV_NONE,
     actions: [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
     keys: [KEYCODE_EMPTY, KEYCODE_EMPTY, KEYCODE_EMPTY, KEYCODE_EMPTY],
-    dksTopUm: 1000,
+    dksTopUm: 100,
     dksBottomUm: 3000,
     tapTicks: 8,
-    delayTicks: 0,
-    randomTicks: 0,
+    delayTicks: 24,
+    randomTicks: 16,
     reserved: new Array(13).fill(0xff),
     keepOriginal: 1,
   };

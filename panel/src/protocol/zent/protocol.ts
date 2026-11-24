@@ -38,6 +38,8 @@ export interface ZentOptions {
   profilePollMs: number;
   profilePollAttempts: number;
   heartbeatMs: number;
+  /** pause after the serial-number reply */
+  serialSettleMs: number;
   /**
    * Refuse reads and writes outside the known memory map. Out-of-range requests have hung
    * the stock firmware (BE 01 at unmapped addresses), so this stays on by default.
@@ -56,6 +58,7 @@ export const DEFAULT_OPTIONS: ZentOptions = {
   profilePollMs: 250,
   profilePollAttempts: 14,
   heartbeatMs: 1000,
+  serialSettleMs: 60,
   restrictToMap: true,
 };
 
@@ -84,7 +87,7 @@ export class ZentStockProtocol implements KeyboardProtocol {
   private cache: Images = {};
   private connected = false;
   /** statistics, handy for the smoke test and debugging */
-  readonly stats = { sent: 0, received: 0, badFrames: 0, retries: 0, streamFrames: 0 };
+  readonly stats = { sent: 0, received: 0, badFrames: 0, retries: 0, streamFrames: 0, retried: [] as string[] };
 
   constructor(private readonly transport: Transport, options: Partial<ZentOptions> = {}) {
     this.opts = { ...DEFAULT_OPTIONS, ...options };
@@ -188,7 +191,10 @@ export class ZentStockProtocol implements KeyboardProtocol {
   private async request<T extends DeviceFrame>(report: Uint8Array, match: (f: DeviceFrame) => f is T, what: string): Promise<T> {
     let lastError: unknown;
     for (let attempt = 0; attempt < this.opts.attempts; attempt++) {
-      if (attempt > 0) this.stats.retries++;
+      if (attempt > 0) {
+        this.stats.retries++;
+        if (this.stats.retried.length < 32) this.stats.retried.push(what);
+      }
       let waiter!: Waiter;
       let timer!: ReturnType<typeof setTimeout>;
       const reply = new Promise<DeviceFrame>((resolve, reject) => {
@@ -322,6 +328,8 @@ export class ZentStockProtocol implements KeyboardProtocol {
   async readSerial(): Promise<string> {
     return this.exclusive(async () => {
       const f = await this.request(encodeSerialRequest(), (x): x is Extract<DeviceFrame, { type: "serial" }> => x.type === "serial", "serial number");
+      // the stock firmware ignores a request that arrives right behind its serial reply
+      await sleep(this.opts.serialSettleMs);
       return f.hex;
     });
   }
