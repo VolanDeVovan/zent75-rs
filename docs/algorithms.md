@@ -177,3 +177,8 @@ just perpetuates reliance on the stored values. The reliable fix is correct per-
 `bot_value`, which is why the panel should always offer recalibration and should flag keys whose
 stored swing (`top−bot`) is implausibly large relative to the live `BE FD` raw range. The vendor's
 calibration flow (host-computed top/bot from the 1003 stream) is the intended remedy.
+
+> **Confirmed on hardware (2026-11-25):** holding a key while the board powers up makes its travel
+> stick at 0 while its raw ADC still moves (S held at plug-in: raw 18169 pressed, travel 0). The
+> power-up baseline is taken from the held position. A replug with no keys pressed cures it. This is
+> the most likely cause of the 2026-11-24 LCtrl/LShift incident.
