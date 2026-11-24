@@ -9,7 +9,7 @@
  *  - a key counts as calibrated once its span exceeds the minimum for its switch type;
  *  - on finish only calibrated keys get new top/bottom values, the others keep the old ones.
  */
-import type { Calibration } from "./keyboard";
+import type { Calibration, KeyboardProtocol, LiveSample } from "./keyboard";
 import { switchType } from "./keycodes";
 
 export const MOVE_THRESHOLD = 3000;
@@ -85,5 +85,64 @@ export class CalibrationSession {
       }
     }
     return { top, bottom, switchType: [...this.before.switchType] };
+  }
+}
+
+
+const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * The whole manual calibration procedure on top of any KeyboardProtocol:
+ * read old values -> calibration mode on -> collect raw scans -> calibration mode off ->
+ * write top/bottom -> save to flash.
+ */
+export class CalibrationFlow {
+  session: CalibrationSession | null = null;
+  private stopStream: (() => void) | null = null;
+
+  constructor(private readonly kb: KeyboardProtocol, private readonly settleMs = 100) {}
+
+  get running(): boolean {
+    return this.session !== null;
+  }
+
+  async start(onProgress?: (session: CalibrationSession, sample: LiveSample) => void): Promise<CalibrationSession> {
+    if (this.session) throw new Error("calibration is already running");
+    const before = await this.kb.readCalibration();
+    const session = new CalibrationSession(before);
+    this.session = session;
+    await this.kb.setCalibrationMode(true);
+    this.stopStream = this.kb.startStream((sample) => {
+      // travel frames still in flight from before the mode switch are ignored
+      if (sample.kind !== "raw" || this.session !== session) return;
+      session.feed(sample.raw);
+      onProgress?.(session, sample);
+    });
+    return session;
+  }
+
+  /** Leave calibration mode without touching the stored values. */
+  async cancel(): Promise<void> {
+    const had = this.session;
+    this.session = null;
+    this.stopStream?.();
+    this.stopStream = null;
+    if (had) await this.kb.setCalibrationMode(false);
+  }
+
+  /** Leave calibration mode, write the accepted keys and save. Returns the indices that were calibrated. */
+  async finish(): Promise<number[]> {
+    const session = this.session;
+    if (!session) throw new Error("calibration is not running");
+    const accepted = session.accepted.flatMap((ok, k) => (ok ? [k] : []));
+    this.session = null;
+    this.stopStream?.();
+    this.stopStream = null;
+    await this.kb.setCalibrationMode(false);
+    if (accepted.length === 0) return [];
+    await wait(this.settleMs);
+    await this.kb.writeCalibration(session.result());
+    await this.kb.save();
+    return accepted;
   }
 }
