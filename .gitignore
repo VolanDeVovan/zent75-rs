@@ -1,0 +1,13 @@
+node_modules/
+dist/
+target/
+*.rep/
+*.gpr
+ghidra_proj/
+re/out/
+re/cache/
+__pycache__/
+*.pyc
+.vite/
+.direnv/
+*.log.tmp
