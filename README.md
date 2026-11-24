@@ -76,7 +76,7 @@ indices go row by row: Esc = 0, LShift = 59, LCtrl = 73, RCtrl = 79, Right = 82.
 
 ## Layout
 
-- `firmware/`: vendor `.uf2` images, untouched (vendor binaries, do not publish)
+- `firmware/vendor/`: vendor `.uf2` images, untouched; `firmware/` will hold our Rust project (vendor binaries, do not publish)
 - `tools/`: Python scripts from the first debugging session
   - `zent_read.py`: read-only dump of firmware version, profile, both layers and key modes
   - `zent_all.py`: 30 s live stream that flags keys whose sensor moves while the firmware sees ~0 travel

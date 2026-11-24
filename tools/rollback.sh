@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot autonomous rollback for the ZENT75-HE (GOAL Phase-0 step 5):
-#   1. flash the vendor stock image (default firmware/0.0.18.uf2) via the UF2 bootloader
+#   1. flash the vendor stock image (default firmware/vendor/0.0.18.uf2) via the UF2 bootloader
 #   2. restore the most recent config backup (backups/<latest>/) and verify every region
 #   3. leave the board in application mode on stock firmware with the user's config
 #
@@ -9,7 +9,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-IMAGE="${1:-firmware/0.0.18.uf2}"
+IMAGE="${1:-firmware/vendor/0.0.18.uf2}"
 BACKUP="${2:-$(ls -1d backups/*/ 2>/dev/null | sort | tail -1)}"
 EXPECT="$(basename "$IMAGE" .uf2)"   # e.g. 0.0.18
 
