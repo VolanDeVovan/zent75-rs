@@ -221,10 +221,26 @@ describe("diffRegion", () => {
     expect(runs.length).toBe(1);
     expect(runs[0].address).toBe(0x80080d00 + 48 * 3);
     expect(runs[0].data.length).toBe(48);
+    expect(diffRegion("rgb_config", Uint8Array.of(5, 1, 2, 3, 4), Uint8Array.of(5, 1, 2, 3, 9), 240)[0].data.length).toBe(5);
+  });
+
+  it("rewrites regions the vendor driver always writes in one piece", () => {
     const rgbB = new Uint8Array(255), rgbA = new Uint8Array(255);
     rgbA[7] = 9;
-    expect(diffRegion("rgb", rgbB, rgbA, 240)[0]).toMatchObject({ address: 0x80080b00 + 6, offset: 6 });
-    expect(diffRegion("rgb_config", Uint8Array.of(5, 1, 2, 3, 4), Uint8Array.of(5, 1, 2, 3, 9), 240)[0].data.length).toBe(5);
+    const runs = diffRegion("rgb", rgbB, rgbA, 255);
+    expect(runs.length).toBe(1);
+    expect(runs[0]).toMatchObject({ address: 0x80080b00, offset: 0 });
+    expect(runs[0].data.length).toBe(255);
+    expect(diffRegion("rgb", rgbA, rgbA.slice(), 255)).toEqual([]);
+    const modeB = new Uint8Array(83), modeA = new Uint8Array(83);
+    modeA[82] = 1;
+    expect(diffRegion("key_mode", modeB, modeA, 255).map((r) => [r.address, r.data.length])).toEqual([[0x800806e0, 83]]);
+    const thB = new Uint8Array(166), thA = new Uint8Array(166);
+    thA[0] = 1;
+    expect(diffRegion("norm_press_th", thB, thA, 255)[0].data.length).toBe(166);
+    for (const n of ["top_value", "bot_value", "keytype_code", "press_th", "return_th", "press_deadzone", "return_deadzone",
+      "norm_return_th", "rgb_solid_enable", "bind_key_mode"] as const) expect(REGIONS[n].whole, n).toBe(true);
+    for (const n of ["key_map", "key_map_fn", "key_cancel_code", "bind_key_setting", "config_name"] as const) expect(REGIONS[n].whole, n).toBe(false);
   });
 
   it("splits long runs into chunks of whole elements and writes everything without a baseline", () => {

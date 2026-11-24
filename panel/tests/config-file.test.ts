@@ -60,7 +60,7 @@ describe("config file", () => {
     });
     expect(res.profiles).toEqual([2]);
     expect(res.saved).toBe(false);
-    expect(res.bytesWritten).toBe(2 + 5 + 48 + 1);
+    expect(res.bytesWritten).toBe(2 + 5 + 48 + 83);
     expect(await b.kb.readConfig()).toEqual(cfg);
     expect((await b.kb.readProfileNames())[2]).toBe("Src");
     expect(b.dev.log.saves).toBe(0);

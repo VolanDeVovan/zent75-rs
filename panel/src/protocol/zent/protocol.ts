@@ -51,7 +51,7 @@ export const DEFAULT_OPTIONS: ZentOptions = {
   timeoutMs: 400,
   attempts: 3,
   maxReadChunk: 240,
-  maxWriteChunk: 240,
+  maxWriteChunk: 255,
   verifyWrites: true,
   saveDelayMs: 1100,
   resetDelayMs: 400,

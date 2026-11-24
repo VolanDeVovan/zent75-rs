@@ -17,15 +17,15 @@ function loadDraft(app: App, key: number): void {
   const a = app.config!.advanced?.[key];
   if (!a) return;
   const d = cloneConfig(a);
-  // records that were never used may carry garbage; present sane editing defaults
+  // an unused record starts from the vendor driver's editing defaults (1.0 / 3.0 mm, 1 ms tap, no delays)
   if (d.mode === ADV_NONE) {
     d.actions = d.actions.map(() => [0, 0, 0, 0]);
     d.reserved = new Array(13).fill(0xff);
-    if (d.dksTopUm < 100 || d.dksTopUm > 3200) d.dksTopUm = 1000;
-    if (d.dksBottomUm <= d.dksTopUm || d.dksBottomUm > 3300) d.dksBottomUm = 3000;
-    if (d.tapTicks < 8 || d.tapTicks > 400) d.tapTicks = 8;
-    if (d.delayTicks > 80) d.delayTicks = 0;
-    if (d.randomTicks > 80) d.randomTicks = 0;
+    d.dksTopUm = 1000;
+    d.dksBottomUm = 3000;
+    d.tapTicks = 8;
+    d.delayTicks = 0;
+    d.randomTicks = 0;
     if (d.suppressOriginal > 1) d.suppressOriginal = 1;
   }
   app.ui.advDraft = d;

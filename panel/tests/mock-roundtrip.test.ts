@@ -116,8 +116,9 @@ describe("ZentStockProtocol against the mock", () => {
     next.autoCalibration = false;
     const before = dev.log.bytesWritten;
     const written = await kb.writeConfig(next);
-    // 2+2 keymap, 1 mode, 4x2 rt, 2x2 normal, 2x2 socd, 5 rgb_config, 3 colour, 1 solid, 1 enable, 4 sleep, 1+1 flags
-    expect(written).toBe(2 + 2 + 1 + 8 + 4 + 4 + 5 + 3 + 1 + 1 + 4 + 1 + 1);
+    // per element: 2+2 keymap, 2+2 socd; whole regions: key_mode 83, 4 RT + 2 normal threshold arrays of 166,
+    // rgb 255, solid 85; small fields: rgb_config 5, enable 1, sleep 4, win lock 1, auto calibration 1
+    expect(written).toBe(2 + 2 + 2 + 2 + 83 + 6 * 166 + 255 + 85 + 5 + 1 + 4 + 1 + 1);
     expect(dev.log.bytesWritten - before).toBe(written);
     expect(i16le(dev.peek(REGIONS.key_map.address + 90, 2))).toEqual([-8]);
     expect(Array.from(dev.peek(REGIONS.rgb_config.address, 5))).toEqual([1 + 4 * 21, 188, 255, 6, 50]);
@@ -139,7 +140,7 @@ describe("ZentStockProtocol against the mock", () => {
       ...next.advanced![46], mode: ADV_DKS, actions: [[2, 0, 0, 0], [0, 1, 1, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
       keys: [4, -7, KEYCODE_EMPTY, KEYCODE_EMPTY], dksTopUm: 800, dksBottomUm: 3200, tapTicks: 16, delayTicks: 8, randomTicks: 0,
     };
-    expect(await kb.writeConfig(next)).toBe(48 + 48 + 2);
+    expect(await kb.writeConfig(next)).toBe(48 + 48 + 83);
     expect(Array.from(dev.peek(REGIONS.bind_key_mode.address + 46, 1))).toEqual([2]);
     expect(Array.from(dev.peek(REGIONS.bind_key_setting.address + 48 * 57 + 16, 8))).toEqual([0xf8, 0xff, 0xf9, 0xff, 41, 0, 0xe8, 0x03]);
     expect(dev.peek(REGIONS.bind_key_setting.address + 48 * 57 + 47, 1)[0]).toBe(0);
@@ -244,7 +245,7 @@ describe("ZentStockProtocol against the mock", () => {
     cal.top[73] = 30123;
     cal.bottom[73] = 18456;
     cal.switchType[73] = 1;
-    expect(await kb.writeCalibration(cal)).toBe(6);
+    expect(await kb.writeCalibration(cal)).toBe(3 * 166);
     expect(Array.from(dev.peek(REGIONS.top_value.address + 146, 2))).toEqual([30123 & 0xff, 30123 >> 8]);
     expect(await kb.readCalibration()).toEqual(cal);
   });

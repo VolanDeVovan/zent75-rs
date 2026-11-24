@@ -15,13 +15,22 @@ export interface Region {
   name: string;
   address: number;
   length: number;
-  /** element size: writes are aligned to whole elements, like the vendor driver does */
+  /** element size: partial writes are aligned to whole elements */
   unit: number;
   writable: boolean;
+  /**
+   * The vendor driver only ever writes this region in one piece. We do the same, so that the
+   * firmware never sees a write pattern its own driver does not produce.
+   */
+  whole: boolean;
 }
 
 const region = (name: string, address: number, length: number, unit: number, writable = true): Region => ({
-  name, address, length, unit, writable,
+  name, address, length, unit, writable, whole: false,
+});
+/** A region the vendor driver always writes completely. */
+const whole = (name: string, address: number, length: number, unit: number): Region => ({
+  name, address, length, unit, writable: true, whole: true,
 });
 
 export const BIND_RECORD_SIZE = 48;
@@ -30,25 +39,25 @@ export const PROFILE_COUNT = 4;
 
 export const REGIONS = {
   // ---- board-global
-  top_value: region("top_value", 0x80070000, 2 * KEY_COUNT, 2),
-  bot_value: region("bot_value", 0x800700b0, 2 * KEY_COUNT, 2),
-  keytype_code: region("keytype_code", 0x80070160, 2 * KEY_COUNT, 2),
+  top_value: whole("top_value", 0x80070000, 2 * KEY_COUNT, 2),
+  bot_value: whole("bot_value", 0x800700b0, 2 * KEY_COUNT, 2),
+  keytype_code: whole("keytype_code", 0x80070160, 2 * KEY_COUNT, 2),
   soft_version: region("soft_version", 0x80070210, 4, 4, false),
   cur_param_num: region("cur_param_num", 0x80070218, 4, 4, false),
   config_name: region("config_name", 0x80070290, PROFILE_NAME_SIZE * PROFILE_COUNT, PROFILE_NAME_SIZE),
   // ---- active profile
   key_map: region("key_map", 0x80080160, 2 * KEY_COUNT, 2),
   key_map_fn: region("key_map_fn", 0x80080210, 2 * KEY_COUNT, 2),
-  press_th: region("press_th", 0x800802c0, 2 * KEY_COUNT, 2),
-  return_th: region("return_th", 0x80080370, 2 * KEY_COUNT, 2),
-  press_deadzone: region("press_deadzone", 0x80080420, 2 * KEY_COUNT, 2),
-  return_deadzone: region("return_deadzone", 0x800804d0, 2 * KEY_COUNT, 2),
-  norm_press_th: region("norm_press_th", 0x80080580, 2 * KEY_COUNT, 2),
-  norm_return_th: region("norm_return_th", 0x80080630, 2 * KEY_COUNT, 2),
-  key_mode: region("key_mode", 0x800806e0, KEY_COUNT, 1),
+  press_th: whole("press_th", 0x800802c0, 2 * KEY_COUNT, 2),
+  return_th: whole("return_th", 0x80080370, 2 * KEY_COUNT, 2),
+  press_deadzone: whole("press_deadzone", 0x80080420, 2 * KEY_COUNT, 2),
+  return_deadzone: whole("return_deadzone", 0x800804d0, 2 * KEY_COUNT, 2),
+  norm_press_th: whole("norm_press_th", 0x80080580, 2 * KEY_COUNT, 2),
+  norm_return_th: whole("norm_return_th", 0x80080630, 2 * KEY_COUNT, 2),
+  key_mode: whole("key_mode", 0x800806e0, KEY_COUNT, 1),
   key_cancel_code: region("key_cancel_code", 0x80080a50, 2 * KEY_COUNT, 2),
-  rgb: region("rgb", 0x80080b00, 3 * LED_COUNT, 3),
-  rgb_solid_enable: region("rgb_solid_enable", 0x80080c08, LED_COUNT, 1),
+  rgb: whole("rgb", 0x80080b00, 3 * LED_COUNT, 3),
+  rgb_solid_enable: whole("rgb_solid_enable", 0x80080c08, LED_COUNT, 1),
   rgb_config: region("rgb_config", 0x80080c60, 5, 5),
   rgb_enable: region("rgb_enable", 0x80080c68, 1, 1),
   cap_enable: region("cap_enable", 0x80080c69, 1, 1),
@@ -58,7 +67,7 @@ export const REGIONS = {
   auto_calib_enable: region("auto_calib_enable", 0x80080c71, 1, 1),
   // ---- firmware >= 0.0.18 only
   bind_key_setting: region("bind_key_setting", 0x80080d00, BIND_RECORD_SIZE * KEY_COUNT, BIND_RECORD_SIZE),
-  bind_key_mode: region("bind_key_mode", 0x80081de0, KEY_COUNT, 1),
+  bind_key_mode: whole("bind_key_mode", 0x80081de0, KEY_COUNT, 1),
 } as const satisfies Record<string, Region>;
 
 export type RegionName = keyof typeof REGIONS;
@@ -364,8 +373,9 @@ export function encodeCalibration(cal: Calibration): Images {
 export interface WriteRun { address: number; data: Uint8Array; region: RegionName; offset: number }
 
 /**
- * Minimal list of writes that turns `before` into `after`. Runs are aligned to the region's
- * element size and split so that no frame carries more than `maxChunk` bytes.
+ * List of writes that turns `before` into `after`. For most regions only the changed elements
+ * are written (runs aligned to the element size); regions flagged `whole` are rewritten
+ * completely when anything in them changed. No frame carries more than `maxChunk` bytes.
  */
 export function diffRegion(name: RegionName, before: Uint8Array | undefined, after: Uint8Array, maxChunk: number): WriteRun[] {
   const r: Region = REGIONS[name];
@@ -383,6 +393,7 @@ export function diffRegion(name: RegionName, before: Uint8Array | undefined, aft
   };
   for (let o = 0; o < r.length; o += unit) {
     let changed = !before || before.length !== after.length;
+    if (r.whole && !changed) changed = before!.some((b, i) => b !== after[i]);
     if (!changed) {
       for (let i = o; i < o + unit; i++) {
         if (before![i] !== after[i]) { changed = true; break; }
