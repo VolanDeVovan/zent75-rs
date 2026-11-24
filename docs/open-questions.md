@@ -1,5 +1,7 @@
 # Open questions and physical-access items
 
+> For the exact capture list to close the physical items below, see [`physical-access-checklist.md`](physical-access-checklist.md).
+
 What the static reverse-engineering could not settle, grouped by whether it needs hardware. The
 confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootloader.md`,
 `stable-vs-latest.md`.
