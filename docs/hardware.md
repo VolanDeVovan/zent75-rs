@@ -105,6 +105,15 @@ There are only 8 analog pins on the QFN48, so the keys are time-multiplexed.
    `0,0,0,0, 2,2,2,2, 4,4,4,4, 6,6,6,6`. So each ADC samples **4 physical analog pins, 4× each**
    (one settling sample discarded + three averaged). A 5th channel (`11`) is sampled separately as a
    reference/supply monitor (reported in the `BE FD` tail, see `protocol.md`).
+   * **The 8 analog-input pads are confirmed from the binary.** `FUN_ram_00015f08` (called first thing
+     in `FUN_ram_0001023c`) sets exactly 8 `IOC` pads to **analog mode** by writing `0x100`
+     (`IOC_PAD_FUNC_CTL_ANALOG`, bit 8) to `HPM_IOC` (`0xf4040000`) `PAD[n].FUNC_CTL` at offsets
+     `0x100,0x108,0x140,0x148,0x150,0x158,0x160,0x168` → pad indices `32,33,40–45` = **PB00, PB01,
+     PB08, PB09, PB10, PB11, PB12, PB13** (HPM pad numbering PA=0–31, PB=32–63; verified against the
+     HPM5361 `hpm_ioc_regs.h`/`hpm_iomux.h`). These are the 8 ADC sense inputs (channels 0–7) fed by
+     the external analog mux(es); they are the "8 analog pins on QFN48" from datasheet table 45. (Note
+     PB00/PB01 double as UART0 and PA04–PA08 as JTAG in ISP/boot stages — no conflict, different boot
+     stage; see `bootloader.md`.)
 3. Results DMA into `0x80092260` (ADC-A) and `0x80092160` (ADC-B), 16 × u32 = `0x40` bytes per ADC
    per trigger.
 

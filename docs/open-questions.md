@@ -12,13 +12,15 @@ confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootlo
   (HPM5361 full / HPM5331 motion / HPM5321 comms — all 2-ADC, same die/pinout, indistinguishable from
   firmware) and the package for certain can only be confirmed by **reading the die silkscreen** — open
   the case. (HPM5301 is ruled out: it has only ADC0, but the firmware drives both ADC0 and ADC1.)
-- **Analog multiplexer chip and its select lines.** The scan uses 8 sense lines (4→ADC0, 4→ADC1)
-  stepped through 11 positions; the step is driven by a GPTMR1 pulse (`FUN_ram_00015250`), and there
-  are **no steady-state GPIO writes to the select lines** in the firmware, so the mux-select pins and
-  the mux IC (the Rainy75-HE sibling reportedly uses Nexperia 74HC4067-class 16:1 parts) are not
-  derivable from the binary. Needs the **schematic or a logic analyzer** on the GPTMR1 outputs / mux
-  select pins, plus continuity to confirm the `0x80040528`/`0x80040580` scan-order tables against the
-  physical matrix.
+- **Analog multiplexer chip and its select lines.** The 8 ADC **sense-input** pads are now pinned
+  from the binary — **PB00, PB01, PB08–PB13**, set to analog mode by `FUN_ram_00015f08` (channels
+  0–7; `hardware.md §3`). What remains is the mux IC and its **select** lines: the scan steps 8 sense
+  lines through 11 positions, driven by a GPTMR1 pulse (`FUN_ram_00015250`), with **no steady-state
+  GPIO writes to the select lines** in the firmware. The four `PIOC` pads at `0xf4118e00/e08/e10/e18`
+  (set to func `3` once at init) are the most likely select lines, but the mux IC itself (the
+  Rainy75-HE sibling reportedly uses Nexperia 74HC4067-class 16:1 parts) and the pad→mux-input wiring
+  need the **schematic or a logic analyzer**, plus continuity to confirm the `0x80040528`/`0x80040580`
+  scan-order tables against the physical matrix.
 - **RGB LED data pin.** Driven by SPI1 MOSI via an IOC pad (func 5, register `0xf40400e8`);
   the exact package pin needs the IOMUX decode against the HPM5361 QFN48 pinout, or probing.
 - **RESOLVED (2026-11-24): the signature-based recovery holds.** Confirmed by device experiment
