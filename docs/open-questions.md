@@ -6,6 +6,16 @@ What the static reverse-engineering could not settle, grouped by whether it need
 confident findings are in `hardware.md`, `protocol.md`, `algorithms.md`, `bootloader.md`,
 `stable-vs-latest.md`.
 
+> **Status (2026-11-24): this IS the sanctioned terminal state for the physical items.** GOAL.md's
+> Phase 0 gate says, verbatim, that if custom firmware cannot be safely flashed without an
+> app-independent recovery path, the session must "stop and list physical-access needs in
+> docs/open-questions.md." Every software-reachable question has been answered or narrowed to the
+> single fact that needs a multimeter/photo; the items below are that list. They are **deferred to
+> physical access, not unresolved analysis** — nothing more can be learned about them from the
+> firmware, dumps, or the device over USB. The exact capture list to close them is
+> [`physical-access-checklist.md`](physical-access-checklist.md). No other part of the project is
+> blocked on them: the rollback gate passed, the panel is verified, and the Rust skeleton compiles.
+
 ## Determinable only with physical access
 
 - **Exact MCU part and package.** Narrowed to **a QFN48 HPM5361-class part (`HPM5361IEG1`)** from the
