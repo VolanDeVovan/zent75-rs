@@ -61,7 +61,7 @@ fn held_key_at_power_up_recovers() {
     let mut max_travel = 0;
     let (_, ours, _) = replay_with("held_at_boot", Compat::FIXED, |s, e, _| {
         if s > 4230 {
-            max_travel = max_travel.max(e.travel[49]);
+            max_travel = max_travel.max(e.travel(49));
         }
     });
     // F = usage 9 → byte 2 bit 1: pressed and released again after the recovery
@@ -134,7 +134,7 @@ fn per_slot_filter_is_not_disturbed_by_neighbours() {
             e.scan(&s, &g, &p, false);
             k.update(&e, &p, &g);
             if n >= 1000 {
-                out.push(e.raw[49]);
+                out.push(e.raw(49));
             }
         }
         out

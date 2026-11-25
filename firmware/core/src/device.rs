@@ -463,11 +463,11 @@ impl Keyboard {
 
     /// Current travel of `key` in µm (stable accessor; the engine internals may change).
     pub fn travel_um(&self, key: usize) -> u16 {
-        self.engine.travel[key]
+        self.engine.travel(key)
     }
     /// Filtered raw ADC count of `key`.
     pub fn raw(&self, key: usize) -> u16 {
-        self.engine.raw[key]
+        self.engine.raw(key)
     }
     /// True once the engine has its rest baseline.
     pub fn engine_ready(&self) -> bool {

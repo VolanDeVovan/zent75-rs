@@ -32,7 +32,7 @@ pub const SWITCH_COOLDOWN: i32 = 7200;
 /// Fn + Esc held this many scans (5 s) triggers the hard reset.
 pub const HARD_RESET_SCANS: u32 = 40000;
 /// Tap-hold: a key held longer than this (0.5 s) sends its hold code.
-pub const TAP_HOLD_SCANS: u64 = 4000;
+pub const TAP_HOLD_SCANS: u16 = 4000;
 /// More keys than this in the pressed list: empty reports until ≤ [`ROLLOVER_RESUME`].
 pub const ROLLOVER_LIMIT: usize = 20;
 pub const ROLLOVER_RESUME: usize = 4;
@@ -131,7 +131,9 @@ pub struct Sent {
     pub len: u8,
 }
 
-const SENT_CAP: usize = 3 * STEP_COUNT * 2;
+/// At most keyboard + consumer + mouse per step.
+#[cfg(feature = "std")]
+const SENT_CAP: usize = 3 * STEP_COUNT;
 
 pub struct KeyProcessor {
     compat: Compat,
@@ -174,7 +176,10 @@ pub struct KeyProcessor {
     seed: u16,
     fn_esc: u32,
     hid: HidState,
+    /// Per-scan send log (host builds only: tests, simulator).
+    #[cfg(feature = "std")]
     sent: [Sent; SENT_CAP],
+    #[cfg(feature = "std")]
     sent_n: usize,
 }
 
@@ -228,7 +233,9 @@ impl KeyProcessor {
                 system: 0,
                 mouse_buttons: 0,
             },
+            #[cfg(feature = "std")]
             sent: [Sent { ep: 0, data: [0; 16], len: 0 }; SENT_CAP],
+            #[cfg(feature = "std")]
             sent_n: 0,
         }
     }
@@ -273,7 +280,8 @@ impl KeyProcessor {
     pub fn keyboard_report(&self) -> [u8; 16] {
         self.host_kb
     }
-    /// Reports the stock firmware would have sent during the last scan.
+    /// Reports the stock firmware would have sent during the last scan (host builds only).
+    #[cfg(feature = "std")]
     pub fn sent(&self) -> &[Sent] {
         &self.sent[..self.sent_n]
     }
@@ -299,7 +307,7 @@ impl KeyProcessor {
             let max = e.max_travel(k);
             let o = &mut self.objs[k];
             o.reset_state();
-            o.max = max;
+            o.max = max as i16;
             let (pt, rt) = (rd16(p, b2::PRESS_TH + 2 * k), rd16(p, b2::RETURN_TH + 2 * k));
             if pt != 0 && rt != 0 {
                 o.press_th = pt;
@@ -387,7 +395,7 @@ impl KeyProcessor {
             o.t_delay = r(30);
             o.t_rand = r(32);
             let g = guard_for(&GUARDS_DKS, k);
-            o.dks_len_thr = [g.bot_len, g.bot_thr, g.top_len, g.top_thr_for(o.max)];
+            o.dks_len_thr = [g.bot_len, g.bot_thr, g.top_len, g.top_thr_for(o.max as i32)];
             for i in 0..4 {
                 o.timer[i] = 0;
                 o.cnt[i] = 0;
@@ -428,7 +436,10 @@ impl KeyProcessor {
         if self.dirty {
             self.apply(p, e);
         }
-        self.sent_n = 0;
+        #[cfg(feature = "std")]
+        {
+            self.sent_n = 0;
+        }
         if e.calibration() {
             return ev; // stock: no key processing, reports frozen
         }
@@ -483,7 +494,7 @@ impl KeyProcessor {
                 let h = o.hold[layer];
                 if o.pressed == 1 {
                     if h != KC_NONE {
-                        o.hold_cnt += 1;
+                        o.hold_cnt = o.hold_cnt.saturating_add(1);
                         o.th = if o.hold_cnt > TAP_HOLD_SCANS { 2 } else { 1 };
                     }
                 } else {
@@ -631,6 +642,10 @@ impl KeyProcessor {
         }
     }
 
+    #[cfg(not(feature = "std"))]
+    fn log(&mut self, _ep: u8, _d: &[u8]) {}
+
+    #[cfg(feature = "std")]
     fn log(&mut self, ep: u8, d: &[u8]) {
         if self.sent_n < SENT_CAP {
             let mut data = [0; 16];
@@ -752,7 +767,7 @@ impl KeyProcessor {
                     o.handler = match o.key_mode {
                         1 => {
                             let g = guard_for(&GUARDS_304, i);
-                            o.set_guard(&g, o.max);
+                            o.set_guard(&g, o.max as i32);
                             Handler::Rt
                         }
                         2 => Handler::Mode2Guard,

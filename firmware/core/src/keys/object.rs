@@ -15,7 +15,7 @@ pub enum Handler {
     Rt,
     /// `key_mode` 2: RT only past the normal actuation point (`0x11EC2`).
     Mode2,
-    /// `key_mode` 2 with a bottom guard (`0x1085A`; Space, `]`, Enter, LShift with `return_th < 300`).
+    /// `key_mode` 2 with a bottom guard (`0x1085A`; Space, `\`, Enter, LShift with `return_th < 300`).
     Mode2Guard,
 }
 
@@ -49,7 +49,8 @@ pub struct Obj {
     pub th_prev: i16,
     /// 0 released, 1 pressed, 2 mode-2 "RT-released".
     pub pressed: u8,
-    pub hold_cnt: u64,
+    /// Scans held (stock u64; saturating here, only `> 4000` matters).
+    pub hold_cnt: u16,
     pub cancel: i16,
     pub socd_byte: u8,
     pub socd_mask: u8,
@@ -66,7 +67,7 @@ pub struct Obj {
     pub bthr: i16,
     pub tlen: i16,
     pub tthr: i16,
-    pub max: i32,
+    pub max: i16,
     pub handler: Handler,
     pub in_plist: bool,
     pub in_slist: bool,

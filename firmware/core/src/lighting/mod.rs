@@ -443,7 +443,7 @@ impl Lighting {
                 }
                 let key = LED_TO_KEY[led as usize] as usize;
                 let full = g.switch_travel_um(key) as i32;
-                let mut h = full - e.travel[key] as i32;
+                let mut h = full - e.travel(key) as i32;
                 if full - 99 <= h {
                     h = full - 100;
                 }

@@ -157,7 +157,7 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
                 }
             }
             for &key in &fx.watch {
-                let ours = (e.raw[key], e.travel[key], k.object(key).pressed);
+                let ours = (e.raw(key), e.travel(key), k.object(key).pressed);
                 if let Some(&exp) = state.get(&key)
                     && ours != exp
                 {

@@ -92,15 +92,6 @@ pub enum KeyPass {
 }
 
 pub struct Engine {
-    /// Filtered raw ADC per key (BE FD words 0–82).
-    pub raw: [u16; KEY_COUNT],
-    /// Travel per key in µm (words 83–165).
-    pub travel: [u16; KEY_COUNT],
-    /// Dynamic rest baseline per key (words 166–248).
-    pub baseline: [u16; KEY_COUNT],
-    /// Power-up baseline per key (words 249–331).
-    pub tracked: [u16; KEY_COUNT],
-
     compat: Compat,
     initialized: bool,
     // ---- per slot: sample path
@@ -118,24 +109,23 @@ pub struct Engine {
     rest0: [i32; N],
     sum: [i32; N],
     pmean: [u16; N],
-    act: [i32; N],
+    act: [u16; N],
     wsum: [u32; N],
     wn: [u16; N],
     // ---- normalisation
-    dz: [i32; N],
+    dz: [i16; N],
     span: [i32; N],
-    top: [u16; N],
     bot_eff: [u16; N],
     stored_top: [u16; N],
     stored_bot: [u16; N],
     typ: [u8; N],
     max_s: [i32; N],
-    act_thr: [i32; N],
-    ha: [i32; N],
-    hb: [i32; N],
-    hc: [i32; N],
-    prev_ha: [i32; N],
-    prev_hb: [i32; N],
+    act_thr: [i16; N],
+    ha: [i16; N],
+    hb: [i16; N],
+    hc: [i16; N],
+    prev_ha: [i16; N],
+    prev_hb: [i16; N],
     prev_raw: [i32; N],
     dyb: [i32; N],
     hist0: [i16; N],
@@ -154,10 +144,9 @@ pub struct Engine {
     da_dmin: [i32; N],
     da_dmax: [i32; N],
     da_dpp: [i32; N],
-    da_tmin: [i32; N],
-    da_tmax: [i32; N],
-    da_tpp: [i32; N],
-    travel_s: [i32; N],
+    da_tmin: [u16; N],
+    da_tmax: [u16; N],
+    da_tpp: [u16; N],
     // ---- state machine
     warm: u32,
     n512: u32,
@@ -190,10 +179,6 @@ impl Default for Engine {
 impl Engine {
     pub const fn new() -> Self {
         Self {
-            raw: [0; KEY_COUNT],
-            travel: [0; KEY_COUNT],
-            baseline: [0; KEY_COUNT],
-            tracked: [0; KEY_COUNT],
             compat: Compat::FIXED,
             initialized: false,
             raw_s: [0; N],
@@ -211,7 +196,6 @@ impl Engine {
             wn: [0; N],
             dz: [0; N],
             span: [1; N],
-            top: [0; N],
             bot_eff: [0; N],
             stored_top: [0; N],
             stored_bot: [0; N],
@@ -242,7 +226,6 @@ impl Engine {
             da_tmin: [0xFFFF; N],
             da_tmax: [0; N],
             da_tpp: [0; N],
-            travel_s: [0; N],
             warm: 0,
             n512: 0,
             captured: false,
@@ -292,7 +275,6 @@ impl Engine {
             let changed = top != self.stored_top[s] || bot != self.stored_bot[s];
             self.stored_top[s] = top;
             self.stored_bot[s] = bot;
-            self.top[s] = top;
             self.bot_eff[s] = if (top as i32 - bot as i32).abs() > 2999 { bot } else { top.wrapping_sub(12000) };
             self.max_s[s] = self.curves.max_travel[self.typ[s] as usize & 7];
             if self.initialized && changed && !self.compat.autocal_ref_from_boot {
@@ -300,15 +282,15 @@ impl Engine {
                 self.swing[s] = (self.bot_eff[s] as i32 - top as i32).abs();
             }
             self.span[s] = if self.initialized && !self.compat.autocal_ref_from_boot {
-                span_of(self.act_ref[s] as f32, top as f32, self.dz[s])
+                span_of(self.act_ref[s] as f32, top as f32, self.dz[s] as i32)
             } else {
-                span_of(self.bot_eff[s] as f32, top as f32, self.dz[s])
+                span_of(self.bot_eff[s] as f32, top as f32, self.dz[s] as i32)
             };
         }
         for s in 0..N {
             // activity threshold: stock indexes it with slot2key of the object index
             let k = if self.compat.object_step_quirk { OBJ_TO_SLOT[s] as usize } else { SLOT_TO_OBJ[s] as usize };
-            self.act_thr[s] = self.max_s[OBJ_TO_SLOT[k] as usize] - 100;
+            self.act_thr[s] = (self.max_s[OBJ_TO_SLOT[k] as usize] - 100) as i16;
         }
         self.autocal = p.0.get(B2_AUTO_CALIB) == Some(&1);
     }
@@ -324,11 +306,11 @@ impl Engine {
         for s in 0..N {
             let x = samples[s] as i32;
             self.raw_s[s] = x;
-            self.dz[s] = if x > 0x8000 { -DZ[s] } else { DZ[s] };
+            self.dz[s] = if x > 0x8000 { -DZ[s] as i16 } else { DZ[s] as i16 };
             self.act_ref[s] = self.bot_eff[s] as i32;
-            self.swing[s] = (self.bot_eff[s] as i32 - self.top[s] as i32).abs();
-            self.span[s] = span_of(self.bot_eff[s] as f32, self.top[s] as f32, self.dz[s]);
-            self.hc[s] = self.max_s[s];
+            self.swing[s] = (self.bot_eff[s] as i32 - self.stored_top[s] as i32).abs();
+            self.span[s] = span_of(self.bot_eff[s] as f32, self.stored_top[s] as f32, self.dz[s] as i32);
+            self.hc[s] = self.max_s[s] as i16;
         }
         self.initialized = true;
     }
@@ -391,10 +373,26 @@ impl Engine {
         let s = OBJ_TO_SLOT[obj] as usize;
         let cur = self.pass == KeyPass::AllAtEnd || s / 8 <= step;
         if cur {
-            KeyInput { ha: self.ha[s], hb: self.hb[s], y: self.raw_s[s] }
+            KeyInput { ha: self.ha[s] as i32, hb: self.hb[s] as i32, y: self.raw_s[s] }
         } else {
-            KeyInput { ha: self.prev_ha[s], hb: self.prev_hb[s], y: self.prev_raw[s] }
+            KeyInput { ha: self.prev_ha[s] as i32, hb: self.prev_hb[s] as i32, y: self.prev_raw[s] }
         }
+    }
+
+    /// Filtered raw ADC count of a key (BE FD words 0–82).
+    pub fn raw(&self, key: usize) -> u16 {
+        self.raw_s[OBJ_TO_SLOT[key] as usize] as u16
+    }
+
+    /// Travel of a key in µm (words 83–165).
+    pub fn travel(&self, key: usize) -> u16 {
+        let s = OBJ_TO_SLOT[key] as usize;
+        (self.max_s[s] - self.hc[s] as i32).clamp(0, self.max_s[s]) as u16
+    }
+
+    /// Power-up baseline of a key (words 249–331).
+    pub fn power_up_baseline(&self, key: usize) -> i32 {
+        self.rest0[OBJ_TO_SLOT[key] as usize]
     }
 
     /// Full travel of object `obj` (µm).
@@ -404,7 +402,7 @@ impl Engine {
 
     /// Plain curve height `hC` of a key (µm, max at rest).
     pub fn height(&self, key: usize) -> i32 {
-        self.hc[OBJ_TO_SLOT[key] as usize]
+        self.hc[OBJ_TO_SLOT[key] as usize] as i32
     }
 
     /// Current span (`(top − bottom − 2·dz)·65536/2636`) of a key.
@@ -439,7 +437,6 @@ impl Engine {
         self.pass = KeyPass::None;
         if cal || self.cal_on {
             self.cal_scan(samples);
-            self.publish();
             return;
         }
         let warm_before = self.warm;
@@ -463,7 +460,6 @@ impl Engine {
             self.step(step, samples, enabled);
         }
         self.bookkeeping();
-        self.publish();
     }
 
     fn step(&mut self, step: usize, samples: &[u16; N], enabled: bool) {
@@ -500,18 +496,18 @@ impl Engine {
             return;
         }
         for s in r {
-            let (b, y, dz, span) = (self.base[s], self.raw_s[s], self.dz[s], self.span[s]);
+            let (b, y, dz, span) = (self.base[s], self.raw_s[s], self.dz[s] as i32, self.span[s]);
             self.dyb[s] = y.wrapping_sub(b);
             let t = self.typ[s];
             let fa = div_rv(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000), span);
-            self.ha[s] = self.curves.height(t, fa);
+            self.ha[s] = self.curves.height(t, fa) as i16;
             let fb = div_rv(dz.wrapping_sub(self.dyb[s]).wrapping_mul(0x10000), span);
-            self.hb[s] = self.curves.height(t, fb);
+            self.hb[s] = self.curves.height(t, fb) as i16;
             let fc = div_rv(self.dyb[s].wrapping_mul(-0x10000), span);
             let hc = self.curves.height(t, fc);
             self.vel[s] = self.hist0[s].wrapping_sub(hc as i16);
             self.hist0[s] = hc as i16;
-            self.hc[s] = hc;
+            self.hc[s] = hc as i16;
         }
     }
 
@@ -552,7 +548,7 @@ impl Engine {
                 if self.ha[s] < self.act_thr[s] {
                     let k = SLOT_TO_OBJ[s] as usize;
                     for &nb in &NEIGHBOURS[k] {
-                        self.act[nb as usize] += 1;
+                        self.act[nb as usize] = self.act[nb as usize].saturating_add(1);
                     }
                 }
             }
@@ -642,7 +638,7 @@ impl Engine {
             } else if !self.compat.held_key_baseline && quiet_mean && self.act[s] == 0 {
                 // A key held at power-up was captured pressed: once it sits clearly above the
                 // baseline (towards rest) for a quiet window, take this level as its rest.
-                let dir = if self.top[s] >= self.bot_eff[s] { 1 } else { -1 };
+                let dir = if self.stored_top[s] >= self.bot_eff[s] { 1 } else { -1 };
                 if dm * dir > HELD_RECOVER_COUNTS {
                     self.base[s] = m;
                     self.rest0[s] = m;
@@ -730,18 +726,7 @@ impl Engine {
         let new = (base + d) & 0xFFFF;
         self.act_ref[s] += (new - self.act_ref[s]) / 2;
         self.ac_fit[s] = new as u16;
-        self.span[s] = span_of(self.act_ref[s] as f32, base as f32, self.dz[s]);
-    }
-
-    /// Key-indexed views for device/sim/lighting.
-    fn publish(&mut self) {
-        for k in 0..KEY_COUNT {
-            let s = OBJ_TO_SLOT[k] as usize;
-            self.raw[k] = self.raw_s[s] as u16;
-            self.travel[k] = (self.max_s[s] - self.hc[s]).clamp(0, self.max_s[s]) as u16;
-            self.baseline[k] = self.base[s] as u16;
-            self.tracked[k] = self.rest0[s] as u16;
-        }
+        self.span[s] = span_of(self.act_ref[s] as f32, base as f32, self.dz[s] as i32);
     }
 
     // ------------------------------------------------------------------ calibration mode
@@ -795,13 +780,16 @@ impl Engine {
     /// `diag` = DA flag (word 498); while set, the travel min/max accumulators are sampled here.
     pub fn stream_frame(&mut self, out: &mut [u8; REPORT_SIZE], diag: bool) -> usize {
         self.diag = diag;
+        let mut travel_s = [0i32; N];
         for s in 0..N {
-            let m = self.max_s[OBJ_TO_SLOT[SLOT_TO_OBJ[s] as usize] as usize];
-            self.travel_s[s] = (m - self.hc[s]).max(0).min(m);
+            let m = self.max_s[s];
+            travel_s[s] = (m - self.hc[s] as i32).max(0).min(m);
         }
         if diag {
             for s in 0..N {
-                da_update(&mut self.da_tmin[s], &mut self.da_tmax[s], &mut self.da_tpp[s], self.travel_s[s]);
+                let (mut lo, mut hi, mut pp) = (self.da_tmin[s] as i32, self.da_tmax[s] as i32, 0);
+                da_update(&mut lo, &mut hi, &mut pp, travel_s[s]);
+                (self.da_tmin[s], self.da_tmax[s], self.da_tpp[s]) = (lo as u16, hi as u16, pp as u16);
             }
         }
         let tail = [
@@ -819,11 +807,11 @@ impl Engine {
             match i / KEY_COUNT {
                 _ if i >= 6 * KEY_COUNT => tail[i - 6 * KEY_COUNT],
                 0 => self.raw_s[s] as u16,
-                1 => self.travel_s[s] as u16,
+                1 => travel_s[s] as u16,
                 2 => self.base[s] as u16,
                 3 => self.rest0[s] as u16,
                 4 => self.da_dpp[s] as u16,
-                _ => self.da_tpp[s] as u16,
+                _ => self.da_tpp[s],
             }
         });
         Reply::new(out).stream(words, STREAM_WORDS)
