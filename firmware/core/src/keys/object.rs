@@ -201,6 +201,7 @@ impl Obj {
     }
 
     /// Run the actuation handler with this step's heights.
+    #[inline]
     pub fn actuate(&mut self, i: KeyInput) {
         match self.handler {
             Handler::Normal => self.normal(i),

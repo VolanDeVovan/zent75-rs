@@ -379,9 +379,19 @@ impl KeyProcessor {
             if mode == 0 {
                 continue;
             }
+            let rec = b2::BIND + 48 * k;
+            if mode > 2 {
+                // other values bind a handler that does nothing (stock `FUN_16494`): not listed
+                // (nothing observable, saves the step-10 work), but byte 47 still applies
+                if rd8(p, rec + 47) == 1 {
+                    let o = &mut self.objs[k];
+                    o.handler = Handler::Normal;
+                    o.code = [KC_NONE; 2];
+                }
+                continue;
+            }
             self.bind_objs[self.bind_n] = k as u8;
             self.bind_n += 1;
-            let rec = b2::BIND + 48 * k;
             let r = |i: usize| rd16(p, rec + i);
             let o = &mut self.objs[k];
             o.bind = match mode {

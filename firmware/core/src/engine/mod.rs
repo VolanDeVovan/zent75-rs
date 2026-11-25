@@ -39,6 +39,16 @@ pub const CAL_WORDS: usize = CAL_SNAPSHOTS * KEY_COUNT;
 
 const N: usize = SLOT_COUNT;
 const IIR_BYPASS: i32 = 323;
+/// Crosstalk source slots of each slot: `s−2`, `s+6`, `s−8` (mod 88).
+const XT_SRC: [[u8; 3]; N] = {
+    let mut t = [[0u8; 3]; N];
+    let mut s = 0;
+    while s < N {
+        t[s] = [((s + N - 2) % N) as u8, ((s + 6) % N) as u8, ((s + N - 8) % N) as u8];
+        s += 1;
+    }
+    t
+};
 const IIR_ACC_LIMIT: i32 = 0x70000;
 
 /// Bank-1 / bank-2 offsets read by the engine.
@@ -376,7 +386,7 @@ impl Engine {
     #[inline]
     pub fn key_input(&self, obj: usize, step: usize) -> KeyInput {
         let s = OBJ_TO_SLOT[obj] as usize;
-        let cur = self.pass == KeyPass::AllAtEnd || s / 8 <= step;
+        let cur = !self.compat.object_step_quirk || self.pass == KeyPass::AllAtEnd || s / 8 <= step;
         if cur {
             KeyInput { ha: self.ha[s] as i32, hb: self.hb[s] as i32, y: self.raw_s[s] }
         } else {
@@ -456,9 +466,12 @@ impl Engine {
         if enabled {
             self.pass = if self.keys_started { KeyPass::PerStep } else { KeyPass::AllAtEnd };
             self.keys_started = true;
-            self.prev_ha = self.ha;
-            self.prev_hb = self.hb;
-            self.prev_raw = self.raw_s;
+            if self.compat.object_step_quirk {
+                // only the stock step mix-up evaluates keys on the previous scan's heights
+                self.prev_ha = self.ha;
+                self.prev_hb = self.hb;
+                self.prev_raw = self.raw_s;
+            }
         }
         let first_step = if warm_before >= WARMUP_SCANS { 0 } else { STEP_COUNT - 1 };
         for step in first_step..STEP_COUNT {
@@ -475,9 +488,9 @@ impl Engine {
         if enabled {
             // crosstalk correction, in slot order (later slots see the new deltas)
             for s in r.clone() {
-                let a = self.dlt[(s + N - 2) % N].wrapping_mul(XT_C1[s]);
-                let b = self.dlt[(s + 6) % N].wrapping_mul(XT_C2[s]);
-                let c = self.dlt[(s + N - 8) % N].wrapping_mul(XT_C3[s]);
+                let a = self.dlt[XT_SRC[s][0] as usize].wrapping_mul(XT_C1[s]);
+                let b = self.dlt[XT_SRC[s][1] as usize].wrapping_mul(XT_C2[s]);
+                let c = self.dlt[XT_SRC[s][2] as usize].wrapping_mul(XT_C3[s]);
                 let comp = a.wrapping_add(b).wrapping_add(c) >> 20;
                 let x = self.raw_s[s].wrapping_sub(comp);
                 self.raw_s[s] = x;
