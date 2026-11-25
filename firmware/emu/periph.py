@@ -115,8 +115,14 @@ class Plic(RegFile):
         return (self.regs.get(self.ENABLE + 4 * (n // 32), 0) >> (n % 32)) & 1
 
     def best(self) -> int | None:
+        """Highest-priority pending, enabled source above the threshold. A claimed source is not
+        delivered again before its completion (gateway); in preemptive mode (feature bit 0) the
+        priorities of the sources in service raise the effective threshold."""
         thr = self.regs.get(self.THRESHOLD, 0)
-        cands = [n for n in self.pending if self.enabled(n) and self.prio(n) > thr]
+        if self.in_service and self.regs.get(self.FEATURE, 0) & 1:
+            thr = max([thr] + [self.prio(n) for n in self.in_service])
+        cands = [n for n in self.pending
+                 if self.enabled(n) and self.prio(n) > thr and n not in self.in_service]
         if not cands:
             return None
         return max(cands, key=lambda n: (self.prio(n), -n))
@@ -195,8 +201,16 @@ class Mchtmr(Periph):
 
 
 class Usb(RegFile):
-    """ChipIdea USB device controller: enough for init not to hang; never sees a host."""
-    USBCMD, ENDPTPRIME, ENDPTFLUSH, PORTSC1 = 0x140, 0x1B0, 0x1B4, 0x184
+    """ChipIdea USB device controller: enough for init not to hang; never sees a host.
+    USBSTS, ENDPTSETUPSTAT and ENDPTCOMPLETE are write-1-to-clear."""
+    USBCMD, USBSTS, ENDPTPRIME, ENDPTFLUSH, PORTSC1 = 0x140, 0x144, 0x1B0, 0x1B4, 0x184
+    W1C = (0x144, 0x1AC, 0x1BC)
+
+    def write(self, off, size, value):
+        if off in self.W1C:
+            self.regs[off] = self.regs.get(off, 0) & ~value & M32
+            return
+        super().write(off, size, value)
 
     def __init__(self, m, name, base):
         super().__init__(m, name, base, 0x4000)

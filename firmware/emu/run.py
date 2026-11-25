@@ -28,6 +28,16 @@ DEFAULT_ELF = os.path.join(os.path.dirname(HERE), "app", "target", "riscv32imafc
                            "release", "zent75-rs")
 HOOK_SYMBOLS = ("enter_bootloader", "EnterBootloader", "jump_to_bootloader", "jump_to_loader")
 
+# Firmware probes (firmware/app/src/scan.rs). Missing symbols just skip the related checks.
+STATS_SYMBOL = "zent75_rs::scan::STATS"
+STATS_FIELDS = ("scans dropped bad_channel hw_conflict adc1_late steps_missing proc_cyc_max "
+                "proc_cyc_sum proc_n adc_cyc_max seq_min seq_max").split()
+HID_GEN_SYMBOL = "zent75_rs::scan::LAST_GEN"  # written only when Keyboard::hid_generation moves
+SCAN_BUDGET = 60_000  # CPU cycles per 125 us scan at 480 MHz
+# Slot position inside a mux step -> (ADC, channel) (scan.rs / docs/hardware.md interleave)
+SLOT_INPUTS = (("ADC0", 1), ("ADC1", 2), ("ADC0", 3), ("ADC1", 4), ("ADC0", 5), ("ADC1", 6),
+               ("ADC0", 7), ("ADC1", 11))
+
 
 class Result:
     def __init__(self, m: Machine, reason: str, lines: list[str]):
@@ -45,7 +55,7 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
          strict_pinmux: bool = False, align_check: bool = True, trace=None, verbose=False,
          enter_bootloader_ms: float | None = None, show_mmio: bool = True,
          reset_flags: int = 0, expect_bootloader: bool = False, preload=None,
-         adc_rest: int | None = None, presses=()) -> Result:
+         adc_rest: int | None = None, presses=(), scan_budget: int = SCAN_BUDGET) -> Result:
     """Run the gate on an ELF/UF2 path (or an `Image`) and return the `Result`."""
     img = path if isinstance(path, Image) else Image.load(path)
     names = RegNames()
@@ -60,6 +70,9 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
         m.sensor.rest = adc_rest
     for spec in presses:
         m.sensor.press(*parse_press(spec))
+    m.hid_watch = m.watch_writes(HID_GEN_SYMBOL)
+    m.scan_budget = scan_budget
+    m.presses = list(presses)
     reason = "not-started"
     hook_target = None
     if m.boot():
@@ -82,13 +95,21 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
 
 
 def parse_press(spec: str):
-    """'ADC0:1:3:100-200:0xC000' -> (adc, channel, mux step, start_ms, end_ms, value)."""
+    """'ADC0:1:3:100-200:0xC000' or 'SLOT:23:100-200:0xC000' -> (adc, channel, mux step,
+    start_ms, end_ms, value). A slot is step * 8 + position (SLOT_INPUTS)."""
     try:
+        if spec.upper().startswith("SLOT:"):
+            _, slot, span, value = spec.split(":")
+            step, pos = divmod(int(slot, 0), 8)
+            adc, ch = SLOT_INPUTS[pos]
+            t0, t1 = span.split("-")
+            return adc, ch, step, float(t0), float(t1), int(value, 0)
         adc, ch, step, span, value = spec.split(":")
         t0, t1 = span.split("-")
         return adc.upper(), int(ch, 0), int(step, 0), float(t0), float(t1), int(value, 0)
     except ValueError:
-        raise ValueError(f"bad --press {spec!r}, want ADCn:channel:step:start-end:value") from None
+        raise ValueError(f"bad --press {spec!r}, want ADCn:channel:step:start-end:value "
+                         "or SLOT:n:start-end:value") from None
 
 
 def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, hook_target,
@@ -136,6 +157,32 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
         name = names.decode(addr) if names.available else f"{addr:#x}"
         m.note(WARN, "poll", f"poll loop broken on {name} ({addr:#010x}) read from {m.sym(info['pc'])} "
                f"(value {info['value']:#x} never changed)")
+    stats = None
+    raw = m.read_symbol(STATS_SYMBOL)
+    if raw is not None and len(raw) == 4 * len(STATS_FIELDS) and reason != "not-started":
+        import struct as _st
+        stats = dict(zip(STATS_FIELDS, _st.unpack(f"<{len(STATS_FIELDS)}I", raw)))
+        budget = getattr(m, "scan_budget", SCAN_BUDGET)
+        if stats["proc_n"]:
+            avg = stats["proc_cyc_sum"] // stats["proc_n"]
+            if avg > budget:
+                m.note(FAIL, "scan-budget", f"Keyboard::scan takes {avg} cycles on average (max "
+                       f"{stats['proc_cyc_max']}), budget {budget} per 125 us scan: frames are "
+                       f"dropped ({stats['dropped']}) and thread mode starves")
+            elif stats["proc_cyc_max"] > budget:
+                m.note(WARN, "scan-budget", f"worst Keyboard::scan {stats['proc_cyc_max']} cycles > "
+                       f"budget {budget}")
+        for k in ("bad_channel", "hw_conflict", "steps_missing"):
+            if stats[k]:
+                m.note(WARN, "scan", f"scan statistic {k} = {stats[k]}")
+    hid = getattr(m, "hid_watch", None)
+    if getattr(m, "presses", None) and reason != "not-started":
+        if hid is None:
+            m.note(WARN, "hid", f"--press given but no {HID_GEN_SYMBOL} to observe the HID state")
+        elif hid[0] == 0:
+            m.note(FAIL, "hid", "--press did not change the keyboard HID state "
+                   "(hid_generation never moved)")
+
     want_jump = hook_target is not None or expect_bootloader
     if want_jump and m.bootloader_jump is None:
         what = (f"{hook_target[1]} forced at {enter_bootloader_ms} ms" if hook_target
@@ -197,6 +244,15 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
         chk("watchdog never expires", ["watchdog"], ", ".join(
             f"{x.name}: {x.feeds} feeds, longest gap {x.max_gap * 1000 / CPU_HZ:.1f} ms" for x in wd))
 
+    if stats is not None:
+        n = stats["proc_n"]
+        chk(f"scan processing within {getattr(m, 'scan_budget', SCAN_BUDGET)} cycles / scan",
+            ["scan-budget"], f"{n} scans, avg {stats['proc_cyc_sum'] // n if n else 0}, "
+            f"max {stats['proc_cyc_max']} cycles" if n else "no scan processed")
+    if getattr(m, "presses", None):
+        chk("--press changes the HID state", ["hid"],
+            f"{hid[0]} hid_generation change(s)" if hid is not None else "not observable")
+
     p("")
     p("== findings")
     if not m.findings:
@@ -249,6 +305,14 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
         for a in act:
             p(f"  {a}")
 
+    if stats is not None:
+        p("")
+        p("== scan statistics (firmware STATS)")
+        p("  " + ", ".join(f"{k} {v if v != 0xFFFFFFFF else '-'}" for k, v in stats.items()))
+        sensor = m.sensor.samples
+        p(f"  ADC samples served {sensor}; HID generation changes "
+          f"{hid[0] if hid is not None else 'n/a'}")
+
     if m.flash_ops or m.rom_calls:
         p("")
         p("== ROM API")
@@ -295,7 +359,10 @@ def main(argv=None) -> int:
                     help="require a clean jump to the loader (use with --reset-flags)")
     ap.add_argument("--adc-rest", type=lambda x: int(x, 0), help="ADC result of an idle input (default 0x8000)")
     ap.add_argument("--press", action="append", default=[], metavar="ADCn:CH:STEP:T0-T1:VALUE",
-                    help="override one ADC slot (channel, mux step 0..10) between T0 and T1 ms")
+                    help="override one ADC input (channel, mux step 0..10) between T0 and T1 ms; "
+                         "or SLOT:n:T0-T1:VALUE (slot = step*8 + position); the HID state must change")
+    ap.add_argument("--scan-budget", type=int, default=SCAN_BUDGET,
+                    help=f"max average cycles per scan (default {SCAN_BUDGET})")
     ap.add_argument("--no-mmio", action="store_true", help="omit the MMIO write list")
     ap.add_argument("-v", "--verbose", action="store_true", help="print events and UART live")
     a = ap.parse_args(argv)
@@ -310,7 +377,7 @@ def main(argv=None) -> int:
                    align_check=not a.no_align_check, trace=trace, verbose=a.verbose,
                    enter_bootloader_ms=a.enter_bootloader, show_mmio=not a.no_mmio,
                    reset_flags=a.reset_flags, expect_bootloader=a.expect_bootloader,
-                   adc_rest=a.adc_rest, presses=a.press)
+                   adc_rest=a.adc_rest, presses=a.press, scan_budget=a.scan_budget)
     except (OSError, ValueError) as e:
         print(f"cannot load {a.image}: {e}", file=sys.stderr)
         return 2

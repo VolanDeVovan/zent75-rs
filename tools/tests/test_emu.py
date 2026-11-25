@@ -324,3 +324,56 @@ def test_panic_handler_is_a_failure_but_keeps_running():
     res = gate(img, ms=2, show_mmio=False)
     assert "panic" in kinds(res), res.text
     assert res.m.first_wfi is not None  # ran on after the panic entry
+
+
+# ---- models added for the full firmware ------------------------------------------------------------
+def test_pad_names_follow_metapac():
+    from regnames import pad_index, pad_name
+    assert pad_name(448) == "PY00" and pad_name(416) == "PX00" and pad_name(29) == "PA29"
+    assert pad_index("PY03") == 451
+
+
+def test_plic_claimed_source_not_redelivered_and_preemption():
+    from periph import Plic
+
+    class M:
+        def irq_changed(self):
+            pass
+    p = Plic(M())
+    p.regs[4 * 6] = 2  # GPTMR1 prio 2
+    p.regs[4 * 58] = 7  # ADC0 prio 7
+    p.regs[p.ENABLE] = 1 << 6
+    p.regs[p.ENABLE + 4] = 1 << 26
+    p.regs[p.FEATURE] = 3  # preemptive + vectored
+    p.raise_irq(6)
+    assert p.claim() == 6
+    p.raise_irq(6)
+    assert p.best() is None  # in service: gateway holds it
+    p.raise_irq(58)
+    assert p.best() == 58  # higher priority preempts
+    assert p.claim() == 58
+    p.write(p.CLAIM, 4, 58)
+    p.write(p.CLAIM, 4, 6)
+    assert p.best() == 6  # re-delivered after completion
+    p.regs[p.THRESHOLD] = 2
+    assert p.best() is None  # threshold lock
+
+
+def test_usbsts_is_write_one_to_clear():
+    res = run_words(store(0xF300C144, 0) + IDLE)  # just boots; use the model directly below
+    usb = next(x for x in res.m.bus.models if x.name == "USB0")
+    usb.regs[0x144] = 0x5
+    usb.write(0x144, 4, 0x1)
+    assert usb.regs[0x144] == 0x4
+
+
+def test_pwm_counter_runs_from_virtual_time():
+    pwm0 = 0xF0318000
+    code = store(pwm0 + 0x08, (20000 - 1) << 4) + store(pwm0 + 0xF0, 1 << 7)
+    code += li(T0, pwm0 + 0x170) + lw(T1, T0, 0) + li(T0, 0x00090000) + sw(T1, T0, 0)
+    for _ in range(50):
+        code += jal(ZERO, 4)  # one basic block each: virtual time advances per block
+    code += li(T0, pwm0 + 0x170) + lw(T1, T0, 0) + li(T0, 0x00090004) + sw(T1, T0, 0)
+    res = run_words(code + IDLE)
+    a, b = struct.unpack("<2I", res.m.uc.mem_read(0x00090000, 8))
+    assert b > a and (b - a) >> 4 < 20000

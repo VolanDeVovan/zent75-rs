@@ -189,6 +189,24 @@ class Machine:
                 continue
             self.uc.mem_write(addr, data)
 
+    def watch_writes(self, symbol: str) -> list | None:
+        """Count CPU stores into a data symbol's bytes; returns a 1-element counter list (or None
+        if the ELF has no such symbol)."""
+        hit = [(a, sz) for a, sz, n in self.img.symbols if n == symbol and sz]
+        if not hit:
+            return None
+        a, sz = hit[0]
+        cnt = [0]
+
+        def on_write(uc, access, addr, size, value, _):
+            cnt[0] += 1
+        self.uc.hook_add(UC_HOOK_MEM_WRITE, on_write, begin=a, end=a + sz - 1)
+        return cnt
+
+    def read_symbol(self, symbol: str) -> bytes | None:
+        hit = [(a, sz) for a, sz, n in self.img.symbols if n == symbol and sz]
+        return bytes(self.uc.mem_read(hit[0][0], hit[0][1])) if hit else None
+
     def preload_flash(self, writes) -> None:
         for addr, data in writes:
             self.uc.mem_write(addr, data)
@@ -424,7 +442,7 @@ class Machine:
         few cycles between them is a busy-wait: jump virtual time ahead (never past the next
         event) so delays of seconds do not take minutes of Python."""
         tp = self._tp
-        if self.cycles - tp[0] < 4000:
+        if self.cycles - tp[0] < 100:  # a polling loop body, not code that timestamps work
             tp[1] += 1
             if tp[1] > 200:
                 target = self.cycles + min(40 * (tp[1] - 200), 240_000)

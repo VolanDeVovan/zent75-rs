@@ -83,7 +83,16 @@ class Adc16(RegFile):
         cfg = self.regs.get(self.SEQ_CFG0, 0)
         n = ((cfg >> 8) & 0xF) + 1
         self.busy = True
-        self.m.schedule(self.m.cycles + n * ADC_CONV_CYCLES, lambda: self._complete(step, n))
+        self.m.schedule(self.m.cycles + n * self.conv_cycles(), lambda: self._complete(step, n))
+
+    def conv_cycles(self) -> int:
+        """CPU cycles per conversion from conv_cfg1: (convert_clock_number + 1 + ~2 sample /
+        overhead clocks) ADC clocks of AHB / (clock_divider + 1). Default ~ADC_CONV_CYCLES."""
+        c = self.regs.get(0x1104)
+        if c is None:
+            return ADC_CONV_CYCLES
+        clocks = ((c >> 4) & 0x1F) + 3
+        return clocks * ((c & 0xF) + 1) * self.m.CPU_HZ // AHB_HZ
 
     def _complete(self, step: int, n: int):
         self.busy = False
@@ -116,9 +125,17 @@ class Adc16(RegFile):
 
 
 class Pwm(RegFile):
-    """PWM counter. PWM0 with cen generates the ADC hardware triggers (see module doc)."""
-    RLD, CMP, CHCFG, GCR = 0x08, 0x0C, 0x80, 0xF0
+    """PWM counter. CNT (+0x170, ticks << 4) runs from virtual time while gcr.cen is set.
+    PWM0 with cen generates the ADC hardware triggers (see module doc)."""
+    RLD, CMP, CHCFG, GCR, CNT = 0x08, 0x0C, 0x80, 0xF0, 0x170
     CEN = 1 << 7
+
+    def read(self, off, size):
+        if off == self.CNT and self.regs.get(self.GCR, 0) & self.CEN:
+            ticks = ((self.regs.get(self.RLD, 0) >> 4) & 0xFFFFFF) + 1
+            t = (self.m.cycles - self.t0) * AHB_HZ // self.m.CPU_HZ
+            return ((t % ticks) << 4) & M32
+        return super().read(off, size)
 
     def __init__(self, m, name, base, adcs=()):
         super().__init__(m, name, base, 0x4000)
@@ -132,9 +149,10 @@ class Pwm(RegFile):
         super().write(off, size, value)
         if off == self.GCR:
             now = value & self.CEN
+            if now and not was:
+                self.t0 = self.m.cycles
             if now and not was and self.adcs:
                 self.gen += 1
-                self.t0 = self.m.cycles
                 self._period(self.gen)
             elif not now:
                 self.gen += 1
@@ -207,7 +225,7 @@ class Gptmr(RegFile):
             if value & (1 << 10):
                 self._arm(ch, self.gen[ch])
 
-    def _arm(self, ch, gen):
+    def _arm(self, ch, gen, slow=False):
         rld = self.regs.get(ch * 0x40 + 0x0C, 0)
         cyc = max((rld + 1) * self.m.CPU_HZ // self.TMR_HZ, 20)
 
@@ -215,11 +233,15 @@ class Gptmr(RegFile):
             if gen != self.gen[ch]:
                 return
             self.reloads += 1
-            self.regs[self.SR] = self.regs.get(self.SR, 0) | (1 << (4 * ch))
+            flag = 1 << (4 * ch)
+            already = self.regs.get(self.SR, 0) & flag
+            self.regs[self.SR] = self.regs.get(self.SR, 0) | flag
             if self.regs.get(self.IRQEN, 0) & self.regs[self.SR] and self.irq is not None:
                 self.m.plic.raise_irq(self.irq)
-            self._arm(ch, gen)
-        self.m.schedule(self.m.cycles + cyc, reload)
+            # Flag still set from the previous reload: further reloads change nothing visible
+            # until software clears it, so poll less often (keeps fast timers cheap).
+            self._arm(ch, gen, slow=bool(already))
+        self.m.schedule(self.m.cycles + (max(cyc, 4000) if slow else cyc), reload)
 
 
 def scan_models(m, source: SensorSource):

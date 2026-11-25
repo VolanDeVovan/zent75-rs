@@ -22,12 +22,17 @@ CHIP = "hpm5361"
 def pad_name(index: int) -> str:
     """Pad index (IOC pad number, 32 per port) -> 'PA00'."""
     port, pin = divmod(index, 32)
-    letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[port]
-    return f"P{letter}{pin:02d}"
+    return f"P{PORTS.get(port, '?')}{pin:02d}"
+
+
+# IOC port letters by pad index / 32: A, B, ... then the special ports X (13) and Y (14), as in
+# hpm-metapac (PY00 = 448).
+PORTS = {**{i: "ABCDEFGHIJKLM"[i] for i in range(13)}, 13: "X", 14: "Y", 15: "Z"}
+_PORT_IDX = {v: k for k, v in PORTS.items()}
 
 
 def pad_index(name: str) -> int:
-    return (ord(name[1]) - ord("A")) * 32 + int(name[2:])
+    return _PORT_IDX[name[1]] * 32 + int(name[2:])
 
 
 class RegNames:
