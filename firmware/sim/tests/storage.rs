@@ -47,6 +47,9 @@ fn saves_survive_a_sim_restart() {
         // unsaved edit on profile 0 after the save is lost by the profile switch below
         sim.vendor_report(&host::with_arg(cmd::SWITCH_PROFILE, 2));
         sim.tick(8);
+        // like stock, cur_param_num only persists with the next BE 02
+        assert!(sim.vendor_report(&host::simple(cmd::SAVE)).is_none());
+        sim.tick(8);
     }
     let mut sim = Sim::new(Options::default(), DirStorage::open(&d).unwrap()).unwrap();
     assert_eq!(sim.kb.active_profile(), 2, "active profile persisted");
@@ -54,6 +57,7 @@ fn saves_survive_a_sim_restart() {
     let mut r = vec![0u8];
     r.extend_from_slice(&host::with_arg(cmd::SWITCH_PROFILE, 0));
     sim.vendor_report(&r);
+    sim.tick(8); // the switch runs in service()
     assert_eq!(sim.kb.profile.key_map(46), 5);
     assert_eq!(
         std::fs::read(d.join("profile0.bin")).unwrap().len(),
