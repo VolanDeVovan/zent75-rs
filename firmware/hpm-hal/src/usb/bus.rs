@@ -9,7 +9,7 @@ use hpm_metapac::usb::regs::*;
 use riscv::delay::McycleDelay;
 
 use super::{ENDPOINT_COUNT, EP_IN_WAKERS, EP_OUT_WAKERS, EndpointState, Instance, init_qhd, local_to_sys_address};
-use crate::usb::{BUS_WAKER, Config, EpConfig, IRQ_RESET, IRQ_SUSPEND, IRQ_VBUS_CHANGE, reset_dcd_data};
+use crate::usb::{BUS_WAKER, Config, EpConfig, IRQ_RESET, IRQ_SUSPEND, reset_dcd_data};
 
 /// USB bus
 pub struct Bus<'d, T: Instance> {
@@ -20,6 +20,40 @@ pub struct Bus<'d, T: Instance> {
     pub(crate) inited: bool,
     pub(crate) config: Config,
     pub(crate) ep_state: &'d EndpointState,
+}
+
+impl<T: Instance> Bus<'_, T> {
+    /// Power event to report from `poll`, if any.
+    ///
+    /// With reused pins there is no VBUS sense: VBUS/session valid are overridden in PHY_CTRL0
+    /// and the device is bus-powered, so power is present from the start and for good.
+    /// OTGSC.ASV must not be consulted: it still reads 0 at the first poll and drops again when
+    /// `enable` sets OTGSC.VD, and the `PowerRemoved` this would report makes embassy-usb call
+    /// `disable`, after which ASV never comes back and the device stays off the bus.
+    #[cfg(feature = "usb-pin-reuse-hpm5300")]
+    fn poll_power(&mut self) -> Option<Event> {
+        if self.inited {
+            return None;
+        }
+        self.inited = true;
+        Some(Event::PowerDetected)
+    }
+
+    /// Power event to report from `poll`, if any: the VBUS state via OTGSC.ASV (A Session
+    /// Valid), once initially and then on every change.
+    #[cfg(not(feature = "usb-pin-reuse-hpm5300"))]
+    fn poll_power(&mut self) -> Option<Event> {
+        let changed = crate::usb::IRQ_VBUS_CHANGE.swap(false, Ordering::AcqRel);
+        if self.inited && !changed {
+            return None;
+        }
+        self.inited = true;
+        if T::info().regs.otgsc().read().asv() {
+            Some(Event::PowerDetected)
+        } else {
+            Some(Event::PowerRemoved)
+        }
+    }
 }
 
 /// Implement the `embassy_usb_driver::Bus` trait for `Bus`.
@@ -47,7 +81,9 @@ impl<T: Instance> embassy_usb_driver::Bus for Bus<'_, T> {
                 w.set_ure(true);
             });
 
-            // Enable VBUS change interrupt (A Session Valid Interrupt Enable)
+            // Enable VBUS change interrupt (A Session Valid Interrupt Enable).
+            // Not with reused pins: there is no VBUS sense, see `poll`.
+            #[cfg(not(feature = "usb-pin-reuse-hpm5300"))]
             r.otgsc().modify(|w| {
                 w.set_asvis(true); // Clear any pending status first
                 w.set_asvie(true); // Enable interrupt
@@ -72,26 +108,9 @@ impl<T: Instance> embassy_usb_driver::Bus for Bus<'_, T> {
             BUS_WAKER.register(cx.waker());
             let r = T::info().regs;
 
-            // Initial VBUS detection
-            if !self.inited {
-                self.inited = true;
-                // Check current VBUS state via OTGSC.ASV (A Session Valid)
-                if r.otgsc().read().asv() {
-                    return Poll::Ready(Event::PowerDetected);
-                } else {
-                    return Poll::Ready(Event::PowerRemoved);
-                }
-            }
-
-            // VBUS change event
-            if IRQ_VBUS_CHANGE.load(Ordering::Acquire) {
-                IRQ_VBUS_CHANGE.store(false, Ordering::Relaxed);
-                // Check current VBUS state
-                if r.otgsc().read().asv() {
-                    return Poll::Ready(Event::PowerDetected);
-                } else {
-                    return Poll::Ready(Event::PowerRemoved);
-                }
+            // Power (VBUS) events
+            if let Some(event) = self.poll_power() {
+                return Poll::Ready(event);
             }
 
             // RESET event

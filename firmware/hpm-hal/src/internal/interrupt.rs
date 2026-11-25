@@ -204,15 +204,17 @@ pub unsafe trait InterruptExt: InterruptNumber + Copy {
     }
 
     /// Get the priority of the interrupt.
+    // The PAC's `priority(n)` is the register of source `n + 1` (0x04 + 4·n; source 0 does
+    // not exist), so source `number()` is index `number() - 1`.
     #[inline]
     fn get_priority(self) -> Priority {
-        Priority::from(PLIC.priority(self.number() as _).read().0 as u8)
+        Priority::from(PLIC.priority(self.number() as usize - 1).read().0 as u8)
     }
 
     /// Set the interrupt priority.
     #[inline]
     fn set_priority(self, prio: Priority) {
-        PLIC.priority(self.number() as _).write(|w| w.set_priority(prio as u32))
+        PLIC.priority(self.number() as usize - 1).write(|w| w.set_priority(prio as u32))
     }
 
     /// Set the interrupt priority with an already-acquired critical section
@@ -222,14 +224,17 @@ pub unsafe trait InterruptExt: InterruptNumber + Copy {
     /// one, which saves code size.
     #[inline]
     fn set_priority_with_cs(self, _cs: CriticalSection, prio: Priority) {
-        PLIC.priority(self.number() as _).write(|w| w.set_priority(prio as u32))
+        PLIC.priority(self.number() as usize - 1).write(|w| w.set_priority(prio as u32))
     }
 
+    /// Signal the end of service of this interrupt.
+    // A plain write: reading the claim/complete register claims the highest-priority pending
+    // source, which would then never be serviced or completed.
     #[inline]
     fn complete(self) {
         PLIC.targetconfig(0)
             .claim()
-            .modify(|w| w.set_interrupt_id(self.number() as u16));
+            .write(|w| w.set_interrupt_id(self.number() as u16));
     }
 }
 
@@ -261,7 +266,7 @@ pub trait PlicExt {
 
     #[inline]
     fn complete(&self, id: u16) {
-        PLIC.targetconfig(0).claim().modify(|w| w.set_interrupt_id(id));
+        PLIC.targetconfig(0).claim().write(|w| w.set_interrupt_id(id));
     }
 }
 

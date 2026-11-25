@@ -106,3 +106,8 @@ hpm6e50 = ["hpm-metapac/hpm6e50", "mcan"]
 hpm6e60 = ["hpm-metapac/hpm6e60", "mcan"]
 hpm6e70 = ["hpm-metapac/hpm6e70", "mcan"]
 hpm6e80 = ["hpm-metapac/hpm6e80", "mcan"]
+
+# Local copy only (PATCHES.md): upstream's own warnings are not ours to fix here.
+[lints.rust]
+unused = "allow"
+unsafe_op_in_unsafe_fn = "allow"
