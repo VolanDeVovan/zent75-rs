@@ -91,7 +91,9 @@ The Fn layer is active while any pressed key has main-layer code 401; it is not 
 Fn switches held keys back to their main codes. A Fn-layer code 1000 is a dead key, not a
 fallthrough. FN2–FN4 do nothing. Undocumented **tap-hold**: bank-2 `+0x000`/`+0x0B0` hold codes
 (per layer, 1000 = off): held > 4000 scans (0.5 s) sends the hold code, released earlier sends the
-normal code for one rebuild. Bank-2 `+0x790`/`+0x7E8` are per-layer modifier masks ORed into byte 0.
+normal code for one rebuild. Bank-2 `+0x790`/`+0x7E8` are per-layer modifier masks ORed into byte 0 while the key is pressed
+(also while a tap-hold is pending). A tap is in the report for one scan only (125 µs), and the
+tap code is sent on release, not on press. The panel edits both in the Keymap tab.
 (The 0.5 s timer belongs to this feature, not to DKS.)
 
 ## SOCD

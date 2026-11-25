@@ -90,11 +90,14 @@ per key"; that was wrong.)
 | `soft_version` | `0x80070210` | 4 |
 | `cur_param_num` (active profile) | `0x80070218` | 4 |
 | `config_name1..4` | `0x80070290 + 64·i` | 64 each |
+| `custom_switch` (4 records, `docs/re-config-rgb.md` §1) | `0x80070390 + 256·i` | 256 each |
+| `hold_code` / `hold_code_fn` (tap-hold, i16) | `0x80080000` / `0x800800B0` | 166 / 166 |
 | `key_map` / `key_map_fn` | `0x80080160` / `0x80080210` | 166 / 166 |
 | `press_th` / `return_th` | `0x800802C0` / `0x80080370` | 166 / 166 |
 | `press_deadzone` / `return_deadzone` | `0x80080420` / `0x800804D0` | 166 / 166 |
 | `norm_press_th` / `norm_return_th` | `0x80080580` / `0x80080630` | 166 / 166 |
 | `key_mode` (u8) | `0x800806E0` | 83 |
+| `mod_mask` / `mod_mask_fn` (u8) | `0x80080790` / `0x800807E8` | 83 / 83 |
 | `key_cancel_code` (SOCD) | `0x80080A50` | 166 |
 | `rgb` / `rgb_solid_enable` / `rgb_config` | `0x80080B00` / `0x80080C08` / `0x80080C60` | 255 / 85 / 5 |
 | `rgb_enable`, `cap_enable`, `rgb_fn_enable` | `0x80080C68`, `0x80080C69`, `0x80080C6B` | 1 each |

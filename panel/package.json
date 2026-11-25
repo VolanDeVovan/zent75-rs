@@ -11,7 +11,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/device-smoke.ts",
-    "write-check": "tsx scripts/device-write-check.ts"
+    "write-check": "tsx scripts/device-write-check.ts",
+    "sim-e2e": "tsx scripts/sim-e2e.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

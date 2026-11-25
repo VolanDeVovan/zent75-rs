@@ -11,13 +11,37 @@ hall-effect keyboard (USB `36b0:357e`) over WebHID. It replaces the vendor web d
 
 | Tab | Functions |
 |---|---|
-| Keymap | main and Fn layer, every key code of the firmware (HID, media, browser, mouse, board functions, Fn), raw code entry |
-| Actuation | per-key mode (normal / rapid trigger), actuation and release points, RT press / release sensitivity, top and bottom dead zones, switch type |
+| Keymap | main and Fn layer, every key code of the firmware (HID, media, browser, mouse, board functions, Fn), raw code entry; per key and layer a **tap-hold** code and a **modifier mask** |
+| Actuation | per-key mode (normal / rapid trigger / **RT below the actuation point**, `key_mode` 2), actuation and release points, RT press / release sensitivity, top and bottom dead zones, switch type incl. the four **custom switches**, and an editor for their curves |
 | SOCD / DKS | SOCD ("last input wins") per key and as mutual pairs, key groups (up to 4 keys), DKS (4 slots × 4 travel phases, trigger points, timing). Groups and DKS need firmware ≥ 0.0.18 |
 | Lighting | on/off, Caps indicator, Fn-layer lighting, effect, hue, saturation, brightness, speed, static colour per key |
 | Calibration | manual calibration (start → press keys → finish and save, or abandon), automatic calibration switch |
 | Live travel | per-key travel in mm (or raw ADC) from the `BE FD` stream, kept alive by a 1 s heartbeat |
 | Device | firmware version, serial number, 4 profiles and their names, sleep timer, Win lock, save to flash, JSON export / import (one or all profiles, optional calibration), reset profile, reboot, enter bootloader (typed confirmation) |
+
+### Tap-hold, modifier masks, key mode 2, custom switches
+
+Firmware features the vendor driver never exposed (field layout: `firmware/core/src/config.rs`,
+behaviour: `firmware/core/src/keys/`, `docs/algorithms.md`):
+
+- **Tap-hold** (`hold_code` / `hold_code_fn`, 1000 = off): a key with a hold code sends nothing
+  while pressed; held longer than 0.5 s it sends the hold code until released, released earlier it
+  sends its keymap code for one report (the tap arrives on release). The 0.5 s are fixed in the
+  firmware. Codes above 1000 are refused: the firmware treats a profile whose first hold code is
+  > 1000 as corrupt.
+- **Modifier mask** (`mod_mask` / `mod_mask_fn`): modifier bits ORed into the report while the
+  key is pressed (WinLock still clears the Win bits).
+- **`key_mode` 2**: normal press at the actuation point, rapid trigger below it; an RT release
+  keeps the key "RT-released" until it re-presses by RT or comes back above the release point. Uses
+  all six threshold arrays.
+- **Custom switches** (`custom_switch`, bank 1, four 256-byte records, keytype codes 4095..4092):
+  name, full travel (1500..4200 µm), colour and a curve of up to 88 points; point i is the
+  normalised sensor position f (0..2636) at (i − 1) × 50 µm of travel, the last point is the full
+  travel and must be 2636, points must not decrease. The panel validates like the firmware
+  (`src/protocol/switches.ts`) and refuses invalid records (the firmware would ignore them and
+  replace them with the factory record at the next boot). **Every bank-1 write is saved to flash by
+  the firmware at once** (and discarded if any key's stored calibration span is < 3000), so the
+  editor asks before writing, writes only changed records, and never touches `top/bot`.
 
 Edits go to the keyboard's RAM immediately and are verified by reading back. They survive a
 replug only after **Save to flash**. A profile switch discards unsaved edits (the panel asks).
@@ -63,6 +87,7 @@ src/protocol/zent/memory.ts   memory map, region <-> model codec, minimal write 
 src/protocol/zent/protocol.ts ZentStockProtocol implements KeyboardProtocol                   /
 src/protocol/calibration.ts   calibration rules and flow, on top of KeyboardProtocol
 src/protocol/keycodes.ts, layout.ts   key code table, effects, switch types, 75% layout, LED map
+src/protocol/switches.ts      custom switch curves: factory record, firmware validation, resampling
 src/transport/webhid.ts       Transport over WebHID
 src/transport/mock.ts         Transport that emulates the keyboard
 scripts/hidraw-transport.ts   Transport over /dev/hidrawN (Node)
@@ -84,11 +109,13 @@ Safety built into the stock protocol:
 - only what differs from what the keyboard holds is written, and in the same shapes the vendor
   driver uses: a remapped key or an SOCD entry is a 2-byte write, a key group / DKS record is a
   48-byte write, while threshold arrays, `key_mode`, `rgb`, `rgb_solid_enable`, `bind_key_mode`
-  and the calibration arrays are always rewritten in one piece.
+  and the calibration arrays are always rewritten in one piece. Tap-hold codes and modifier masks
+  (not used by the vendor driver) are written per element; custom switch records one 256-byte
+  record at a time.
 
 ## Tests
 
-`npm test` runs 97 tests in 6 files:
+`npm test` runs 113 tests in 7 files:
 
 - `crc.test.ts`: CRC-16/MODBUS catalogue vector, Modbus RTU frames, residue, bitwise reference
 - `frames.test.ts`: 1024-byte padding, report id 0, exact bytes of every command, both
@@ -99,6 +126,22 @@ Safety built into the stock protocol:
   profile switch, save / reboot persistence, names, stream, range guard, bootloader)
 - `calibration.test.ts`: acceptance rules and the full flow against the mock
 - `config-file.test.ts`: export / import, all-profile restore, firmware without DKS, validation
+- `tap-hold-switches.test.ts`: tap-hold / modifier-mask codec and mock round trip, custom switch
+  record codec (byte-exact factory record, lossless), firmware validation rules, resampling,
+  record-wise bank-1 writes, discard on implausible calibration, config-file round trip
+
+## Simulator end-to-end check
+
+`npm run sim-e2e` (`scripts/sim-e2e.ts`) starts the firmware simulator (`firmware/sim`, build it
+first), opens **only** the hidraw node it prints and checks in sysfs that it is `36B0:5A11`
+before using it; the real keyboard is never looked up. Through `ZentStockProtocol` it writes a
+tap-hold code, a modifier mask, `key_mode` 2 and a custom switch record, then drives keys through
+the simulator's control socket and checks the firmware core's HID output and engine travel: no
+report while a tap-hold is pending, the hold code after 0.5 s, a one-scan tap report on a short
+tap, LShift+s from a masked S, the full `key_mode` 2 sequence (press at the actuation point, RT
+release / re-press below and above it, reset above the release point), and a key on the 4.0 mm
+custom record travelling 4000/3420 as far as one on the built-in type. Needs rw on `/dev/uhid`
+(and `sudo -n chmod` for the hidraw node when it is root-only).
 
 ## Smoke test against the real keyboard
 
