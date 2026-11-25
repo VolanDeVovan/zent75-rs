@@ -20,7 +20,7 @@ from pathlib import Path
 import zentlib as zl
 
 CMD_PROF_READ, CMD_PROF_START = 0xD1, 0xD2
-SAMPLES = 4096
+SAMPLES = 2048  # firmware/app/src/prof.rs
 DEFAULT_ELF = Path(__file__).resolve().parent.parent / \
     "firmware/app/target/riscv32imafc-unknown-none-elf/release/zent75-rs"
 
@@ -74,7 +74,7 @@ def symbols(elf: Path) -> tuple[list[int], list[tuple[int, int, str]]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--elf", type=Path, default=DEFAULT_ELF)
-    ap.add_argument("--captures", type=int, default=5)
+    ap.add_argument("--captures", type=int, default=10)
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--dump", type=Path, help="also write the raw PCs (hex, one per line)")
     args = ap.parse_args()

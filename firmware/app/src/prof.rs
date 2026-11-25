@@ -9,8 +9,9 @@ use hpm_hal::pac;
 
 use crate::plic;
 
-/// Samples per capture (~0.4 s at the sample rate below); `tools/profile.py` sums captures.
-pub const SAMPLES: usize = 4096;
+/// Samples per capture (~0.2 s at the sample rate below); `tools/profile.py` sums captures.
+/// 8 KB of AHB SRAM: the rest holds the engine's height tables (`kb`).
+pub const SAMPLES: usize = 2048;
 /// GPTMR0 reload in 24 MHz ticks: 2399 → ~10.004 kHz (2399 is prime).
 const RELOAD: u32 = 2399;
 

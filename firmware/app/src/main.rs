@@ -243,6 +243,7 @@ async fn health_task() {
 /// the keyboard yet: the scan interrupt and the USB tasks start afterwards.
 #[inline(never)]
 fn boot_keyboard(uid: [u8; 16], store: StoreRef) {
+    kb::attach_height_tables();
     let active = kb::with(|kb| {
         kb.boot(uid, &mut *store.borrow_mut());
         kb.active_profile()
