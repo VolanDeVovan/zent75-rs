@@ -189,6 +189,14 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
                 m.note(FAIL, "hid", "--press did not change the keyboard HID state during the press "
                        f"(hid_generation moved {hid[0]} time(s), none in the press window)")
 
+    # USB must attach (USBCMD.RS) within the first 1.5 s of a run that lasts that long
+    usb_run_at = getattr(m, "usb_run_at", None)
+    if reason != "not-started" and m.ms() >= 1500 and (usb_run_at is None or m.ms(usb_run_at) > 1500):
+        m.note(FAIL, "usb", "USB0 never attached to the bus (USBCMD.RS not set within 1.5 s)")
+    usb = next((x for x in m.bus.models if x.name == "USB0"), None)
+    if usb is not None and usb_run_at is not None and reason != "bootloader" and not usb.get(usb.USBCMD) & 1:
+        m.note(FAIL, "usb", "USB0 detached again by the end of the run (USBCMD.RS = 0)")
+
     want_jump = hook_target is not None or expect_bootloader
     if want_jump and m.bootloader_jump is None:
         what = (f"{hook_target[1]} forced at {enter_bootloader_ms} ms" if hook_target

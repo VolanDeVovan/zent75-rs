@@ -202,18 +202,43 @@ class Mchtmr(Periph):
 
 class Usb(RegFile):
     """ChipIdea USB device controller: enough for init not to hang; never sees a host.
-    USBSTS, ENDPTSETUPSTAT and ENDPTCOMPLETE are write-1-to-clear."""
+    USBSTS, ENDPTSETUPSTAT and ENDPTCOMPLETE are write-1-to-clear.
+
+    VBUS: the board has no VBUS sense pin; firmware forces VBUS/session valid in PHY_CTRL0.
+    OTGSC.ASV/AVV only follow that override after a delay (on hardware ASV still read 0 at
+    hpm-hal's first `poll`, measured by bring-up probe 7) — modelled as `VBUS_SETTLE_MS`.
+    `m.usb_run_at` records the first USBCMD.RS = 1 (the device attached to the bus)."""
     USBCMD, USBSTS, ENDPTPRIME, ENDPTFLUSH, PORTSC1 = 0x140, 0x144, 0x1B0, 0x1B4, 0x184
+    OTGSC, PHY_CTRL0 = 0x1A4, 0x210
     W1C = (0x144, 0x1AC, 0x1BC)
+    OTGSC_AVV_ASV = (1 << 9) | (1 << 10)
+    PHY_SESS_OVERRIDE = (1 << 13) | (1 << 1)  # sess_valid_override + its enable
+    VBUS_SETTLE_MS = 150
 
     def write(self, off, size, value):
         if off in self.W1C:
             self.regs[off] = self.regs.get(off, 0) & ~value & M32
             return
+        if off == self.PHY_CTRL0:
+            if value & self.PHY_SESS_OVERRIDE == self.PHY_SESS_OVERRIDE:
+                if self.vbus_since is None:
+                    self.vbus_since = self.m.cycles
+            else:
+                self.vbus_since = None
+        if off == self.USBCMD and value & 1 and getattr(self.m, "usb_run_at", None) is None:
+            self.m.usb_run_at = self.m.cycles
         super().write(off, size, value)
+
+    def get(self, off):
+        v = super().get(off)
+        if off == self.OTGSC and self.vbus_since is not None and \
+                self.m.ms(self.m.cycles - self.vbus_since) >= self.VBUS_SETTLE_MS:
+            v |= self.OTGSC_AVV_ASV
+        return v
 
     def __init__(self, m, name, base):
         super().__init__(m, name, base, 0x4000)
+        self.vbus_since = None
         self.ro[self.USBCMD] = (~0x2 & M32, 0)  # rst self-clears
         self.ro[self.ENDPTPRIME] = (0, 0)
         self.ro[self.ENDPTFLUSH] = (0, 0)
