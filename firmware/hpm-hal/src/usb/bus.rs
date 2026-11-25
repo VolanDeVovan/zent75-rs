@@ -9,7 +9,10 @@ use hpm_metapac::usb::regs::*;
 use riscv::delay::McycleDelay;
 
 use super::{ENDPOINT_COUNT, EP_IN_WAKERS, EP_OUT_WAKERS, EndpointState, Instance, init_qhd, local_to_sys_address};
-use crate::usb::{BUS_WAKER, Config, EpConfig, IRQ_RESET, IRQ_SUSPEND, reset_dcd_data};
+use crate::usb::{BUS_WAKER, Config, EpConfig, IRQ_RESET, IRQ_SUSPEND, reset_dcd_data, spin_until};
+
+/// Flush attempts per endpoint in `endpoint_close`.
+const FLUSH_TRIES: usize = 8;
 
 /// USB bus
 pub struct Bus<'d, T: Instance> {
@@ -148,9 +151,10 @@ impl<T: Instance> embassy_usb_driver::Bus for Bus<'_, T> {
                 // Reset bus
                 self.device_bus_reset(64);
 
-                // Enable usb transfer interrupt
+                // Enable usb transfer interrupt, and the reset interrupt again (the handler
+                // turned it off until this point): the next bus reset must be seen too
                 r.usbintr().modify(|w| w.set_ue(true));
-                r.usbintr().modify(|w| w.set_ure(false));
+                r.usbintr().modify(|w| w.set_ure(true));
 
                 return Poll::Ready(Event::Reset);
             }
@@ -326,11 +330,11 @@ impl<T: Instance> Bus<'_, T> {
         r.endptsetupstat().modify(|w| w.0 = w.0);
         r.endptcomplete().modify(|w| w.0 = w.0);
 
-        while r.endptprime().read().0 != 0 {}
+        spin_until(|| r.endptprime().read().0 == 0);
 
         r.endptflush().modify(|w| w.0 = 0xFFFFFFFF);
 
-        while r.endptflush().read().0 != 0 {}
+        spin_until(|| r.endptflush().read().0 == 0);
 
         // Reset DCD_DATA
         unsafe {
@@ -457,18 +461,18 @@ impl<T: Instance> Bus<'_, T> {
         let ep_bit = 1 << ep_addr.index();
 
         // Flush the endpoint first
-        if ep_addr.is_in() {
-            loop {
-                r.endptflush().modify(|w| w.set_fetb(ep_bit));
-                while (r.endptflush().read().fetb() & ep_bit) == 1 {}
+        // (repeated while the endpoint still reads as primed: a flush can lose against a
+        // packet in progress; bounded, a controller that never reports done must not hang us)
+        for _ in 0..FLUSH_TRIES {
+            if ep_addr.is_in() {
+                r.endptflush().write(|w| w.set_fetb(ep_bit));
+                spin_until(|| r.endptflush().read().fetb() & ep_bit == 0);
                 if r.endptstat().read().etbr() & ep_bit == 0 {
                     break;
                 }
-            }
-        } else {
-            loop {
-                r.endptflush().modify(|w| w.set_ferb(ep_bit));
-                while (r.endptflush().read().ferb() & ep_bit) == 1 {}
+            } else {
+                r.endptflush().write(|w| w.set_ferb(ep_bit));
+                spin_until(|| r.endptflush().read().ferb() & ep_bit == 0);
                 if r.endptstat().read().erbr() & ep_bit == 0 {
                     break;
                 }

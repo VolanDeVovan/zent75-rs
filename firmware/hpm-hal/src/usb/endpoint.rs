@@ -17,6 +17,9 @@ pub enum TransferError {
     BufferTooLarge,
     /// Buffer alignment requirement not met (>4K data needs 4K alignment)
     BufferAlignment,
+    /// Control endpoint only: a new SETUP packet is waiting, the transfer it would continue
+    /// has been abandoned by the host
+    SetupPending,
 }
 
 pub(crate) struct EpConfig {
@@ -86,10 +89,12 @@ impl<'d, T: Instance, D> Endpoint<'d, T, D> {
         let ep_num = self.info.addr.index();
         let ep_idx = 2 * ep_num + self.info.addr.is_in() as usize;
 
-        //  Setup packet handling using setup lockout mechanism
-        //  wait until ENDPTSETUPSTAT before priming data/status in response
-        if ep_num == 0 {
-            while (r.endptsetupstat().read().endptsetupstat() & 0b1) == 1 {}
+        // A data or status stage must not be primed while ENDPTSETUPSTAT is set. The flag is
+        // only cleared by `ControlPipe::setup`, which runs in the same task as the caller, so
+        // waiting for it here would spin forever: it means the host has abandoned the request
+        // being answered and sent a new SETUP. Give the stage up instead.
+        if ep_num == 0 && (r.endptsetupstat().read().endptsetupstat() & 0b1) == 1 {
+            return Err(TransferError::SetupPending);
         }
 
         // Check transfer size limit (8 QTDs * 16KB each = 128KB max)
@@ -238,14 +243,15 @@ impl<'d, T: Instance> EndpointOut for Endpoint<'d, T, Out> {
 
             if r.endptcomplete().read().erce() & (1 << ep_num) != 0 {
                 r.endptcomplete().write(|w| w.set_erce(1 << ep_num));
-                Poll::Ready(())
+                Poll::Ready(Ok(()))
             } else if !Out::is_enabled(r, ep_num) {
-                Poll::Ready(())
+                // closed by a bus reset or a configuration change: nothing was received
+                Poll::Ready(Err(embassy_usb_driver::EndpointError::Disabled))
             } else {
                 Poll::Pending
             }
         })
-        .await;
+        .await?;
 
         // Get the actual length of the packet (OUT endpoint: ep_idx = 2 * ep_num)
         let ep_idx = 2 * ep_num;
@@ -254,6 +260,27 @@ impl<'d, T: Instance> EndpointOut for Endpoint<'d, T, Out> {
             ep_state.qhd_list().qhd(ep_idx).qtd_token().read().total_bytes() as usize
         };
         Ok(buf.len() - len)
+    }
+}
+
+impl<'d, T: Instance> Endpoint<'d, T, In> {
+    /// Wait until the primed IN transfer has completed. `Disabled` if the endpoint was closed
+    /// meanwhile (bus reset, configuration change): the data was not sent.
+    async fn wait_sent(&mut self) -> Result<(), embassy_usb_driver::EndpointError> {
+        let r = T::info().regs;
+        let ep_num = self.info.addr.index();
+        poll_fn(|cx| {
+            In::waker(ep_num).register(cx.waker());
+            if r.endptcomplete().read().etce() & (1 << ep_num) != 0 {
+                r.endptcomplete().write(|w| w.set_etce(1 << ep_num));
+                Poll::Ready(Ok(()))
+            } else if !In::is_enabled(r, ep_num) {
+                Poll::Ready(Err(embassy_usb_driver::EndpointError::Disabled))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 }
 
@@ -268,32 +295,12 @@ impl<'d, T: Instance> EndpointIn for Endpoint<'d, T, In> {
 
         // Start write and wait
         self.transfer(buf).map_err(|_| embassy_usb_driver::EndpointError::BufferOverflow)?;
-        poll_fn(|cx| {
-            In::waker(ep_num).register(cx.waker());
-            if r.endptcomplete().read().etce() & (1 << ep_num) != 0 {
-                r.endptcomplete().write(|w| w.set_etce(1 << ep_num));
-                Poll::Ready(())
-            } else if !In::is_enabled(r, ep_num) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
+        self.wait_sent().await?;
 
         // Send zlt packet(if needed)
         if buf.len() == self.info.max_packet_size as usize {
             let _ = self.transfer(&[]);
-            poll_fn(|cx| {
-                In::waker(ep_num).register(cx.waker());
-                if r.endptcomplete().read().etce() & (1 << ep_num) != 0 {
-                    r.endptcomplete().write(|w| w.set_etce(1 << ep_num));
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
+            self.wait_sent().await?;
         }
 
         Ok(())

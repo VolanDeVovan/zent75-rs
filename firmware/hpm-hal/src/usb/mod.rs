@@ -105,6 +105,21 @@ mod types_v62;
 pub use state::EndpointState;
 
 static IRQ_RESET: AtomicBool = AtomicBool::new(false);
+
+/// Upper bound for the register polls of this driver: about a millisecond or more of polling,
+/// far beyond what the controller needs for a flush or a prime. A wait that runs into it is
+/// given up, never spun on: the caller is the only executor thread.
+const SPIN_LIMIT: u32 = 100_000;
+
+/// Poll `done` until it is true; `false` if it never was within [`SPIN_LIMIT`] polls.
+pub(crate) fn spin_until(mut done: impl FnMut() -> bool) -> bool {
+    for _ in 0..SPIN_LIMIT {
+        if done() {
+            return true;
+        }
+    }
+    false
+}
 static IRQ_SUSPEND: AtomicBool = AtomicBool::new(false);
 static IRQ_VBUS_CHANGE: AtomicBool = AtomicBool::new(false);
 
@@ -634,7 +649,23 @@ pub unsafe fn on_interrupt<T: Instance>() {
     let triggered_interrupts = status.0 & enabled_interrupts.0;
 
     let status = Usbsts(triggered_interrupts);
-    r.usbsts().modify(|w| w.0 = w.0);
+    // Write-1-to-clear: only what is handled below. A bit whose interrupt is off right now
+    // (a second bus reset while the first is still being processed) stays set and fires once
+    // its enable is back.
+    r.usbsts().write(|w| w.0 = triggered_interrupts);
+
+    // VBUS change detection (OTGSC register, independent of USBSTS). Must come before the
+    // early return below: a session-valid change without any USBSTS interrupt would otherwise
+    // leave its status bit set and the interrupt asserted for good — an interrupt storm that
+    // starves everything below this priority.
+    let otgsc = r.otgsc().read();
+    if otgsc.asvis() {
+        // Clear A Session Valid Interrupt Status (write 1 to clear)
+        r.otgsc().modify(|w| w.set_asvis(true));
+        // Signal VBUS change
+        IRQ_VBUS_CHANGE.store(true, Ordering::Relaxed);
+        BUS_WAKER.wake();
+    }
 
     // Disabled interrupt sources
     if status.0 == 0 {
@@ -651,6 +682,9 @@ pub unsafe fn on_interrupt<T: Instance>() {
 
         // Wake USB bus. Then the reset event will be processed in Bus::poll()
         BUS_WAKER.wake();
+        // A control transfer in flight is over: let the control pipe give up on it
+        EP_IN_WAKERS[0].wake();
+        EP_OUT_WAKERS[0].wake();
     }
 
     // Suspend event
@@ -682,6 +716,8 @@ pub unsafe fn on_interrupt<T: Instance>() {
         // If it's a setup packet, wake the EP OUT 0
         if r.endptsetupstat().read().endptsetupstat() > 0 {
             EP_OUT_WAKERS[0].wake();
+            // also a control IN stage the host has abandoned for this new SETUP
+            EP_IN_WAKERS[0].wake();
         }
 
         // Transfer completed
@@ -701,15 +737,6 @@ pub unsafe fn on_interrupt<T: Instance>() {
         r.usbintr().modify(|w| w.set_ue(true));
     }
 
-    // VBUS change detection (OTGSC register, independent of USBSTS)
-    let otgsc = r.otgsc().read();
-    if otgsc.asvis() {
-        // Clear A Session Valid Interrupt Status (write 1 to clear)
-        r.otgsc().modify(|w| w.set_asvis(true));
-        // Signal VBUS change
-        IRQ_VBUS_CHANGE.store(true, Ordering::Relaxed);
-        BUS_WAKER.wake();
-    }
 }
 
 pin_trait!(DmPin, Instance);
