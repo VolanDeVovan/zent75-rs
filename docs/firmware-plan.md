@@ -9,7 +9,7 @@ Rust on **embassy + `hpm-hal`** (feature `hpm5361`), target `riscv32imafc-unknow
 | `app/` — board layer running `Keyboard` on the HPM5361 | **runs on the real keyboard**; hardware status in the checklist below |
 | `sim/` — host simulator (uhid) | runs `Keyboard` with a sensor model |
 | `emu/` — unicorn pre-flash gate for our ELF | run before every flash |
-| `hpm-hal/` — local copy of the HAL with five fixes found on the board (`PATCHES.md`) | candidates for upstream |
+| `hpm-hal/` — local copy of the HAL with the USB and PLIC fixes found on the board (`PATCHES.md`) | candidates for upstream |
 
 ## Why Rust
 
@@ -87,6 +87,32 @@ Found and fixed during bring-up: the hpm-hal bugs in `firmware/hpm-hal/PATCHES.m
 completion clearing, endpoint enable, VBUS events without a sense pin, PLIC priority index and
 completion), and ADC steps captured too late (`scan.rs`, `LATEST_TICKS`: a torn DMA buffer read
 as a key press; such steps are now dropped and counted as `late`).
+
+### Host reboot → UF2 loader (open until confirmed on the keyboard)
+
+With an earlier build on the board, rebooting the host PC left the keyboard in the UF2 loader.
+Only a panic or a watchdog reset leads there, and the record of it was lost (the board went back
+to stock). The USB driver had two ways to stop thread mode from feeding the watchdog, both
+reproduced with the emulator's scripted host (`emu/run.py --usb-host reboot` / `vbus-glitch`)
+on that build and fixed in `firmware/hpm-hal` (`PATCHES.md`, "USB robustness"):
+
+1. **Interrupt storm on a session-valid change.** The USB interrupt handler returned before it
+   cleared OTGSC.ASVIS when no other USB interrupt was pending. A VBUS dip that the board
+   survives while the host is silent (a reboot) then re-enters the handler forever; scan
+   processing and thread mode starve, the watchdog resets after 2 s. Most likely the cause: it
+   needs nothing but the glitch.
+2. **Spin on an abandoned control transfer.** A new SETUP that arrives before the next stage
+   of the previous request is primed made ep0's `transfer` wait forever for a flag that only
+   the same task clears.
+
+Next to these, bus resets after the first one never reached embassy-usb and control stages
+waited without a way out, so a re-enumeration could leave the device mute (not in the loader).
+
+To confirm on the keyboard: reboot the host a few times with the console history at hand. The
+keyboard must come back each time; `usb: bus reset` / `usb: configured` lines show the
+re-enumerations. If it lands in the loader again, flash the same UF2 **without replugging** and
+read `tools/console.py`: the first lines must show `previous run: …` with the panic location or
+the stall pcs.
 
 ### Not verified yet (in order of risk)
 

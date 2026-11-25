@@ -13,7 +13,7 @@ verified there and what is not: the checklist in the plan.
 | `app/` | `zent75-rs` (RISC-V binary) | the **board layer**: clocks, scan, USB, RGB, flash, reset/bootloader, runs `Keyboard` |
 | `sim/` | `zent-sim` (host) | simulator: sensor model + `Keyboard` behind a virtual uhid device (`36B0:5A11`), see `sim/README.md` |
 | `emu/` | Python (unicorn) | **pre-flash gate**: runs our ELF on an emulated HPM5361 and fails on anything that could hurt the keyboard, see `emu/README.md` |
-| `hpm-hal/` | `hpm-hal` (local copy) | upstream HAL at a pinned revision plus five bug fixes found on this board, see `hpm-hal/PATCHES.md` |
+| `hpm-hal/` | `hpm-hal` (local copy) | upstream HAL at a pinned revision plus the USB and PLIC fixes this board needed, see `hpm-hal/PATCHES.md` |
 
 ## Build and package
 
@@ -100,7 +100,7 @@ on a fake NOR, including the write gate.
 | `rgb.rs` | SPI1 (12 MHz) + HDMA WS2812 stream, non-blocking |
 | `system.rs` | `BE FC` → stock loader sequence (quiesce, PLIC cleanup, caches off, jump `0x80020000`); `BE FF` → PPOR software reset; panic → crash record + loader; EWDG0 watchdog (2 s), watchdog reset → loader on the next boot |
 | `console.rs` | `log!`: UART0 PA00/PA01 115 200 8N1 (synchronous during boot, then a ring drained by a task) and a 4 KB history for the USB console |
-| `debug/` | everything stock does not have: debug vendor commands (`mod.rs`), crash record + thread-mode stall detector (`crash.rs`), statistical profiler (`prof.rs`) — see [Debugging](#debugging) |
+| `debug/` | everything stock does not have: debug vendor commands (`mod.rs`), crash record + stall detector (`crash.rs`), statistical profiler (`prof.rs`) — see [Debugging](#debugging) |
 
 Interrupts: ADC0 `seq_cvc` prio 7 (capture), GPTMR0 prio 5 (profiler sample, only during a
 capture), USB0 prio 3, GPTMR1 prio 2 (processing, re-enables MIE), MCHTMR (embassy time). The
@@ -136,7 +136,7 @@ read the firmware version first — ours reports 1.x, stock 0.0.x — in `zentli
 |---|---|
 | `tools/console.py [-f]` | the console over USB: the last 4 KB of log, optionally following |
 | `tools/profile.py` | statistical CPU profile: share of 10 kHz PC samples per function of the ELF (feature `profiler`) |
-| crash record | a panic message, or the PC thread mode was stuck at when the watchdog was about to fire, is kept in AHB SRAM and logged as `previous run: …` at the next start of the firmware |
+| crash record | a panic message with its location, or — when the watchdog has not been fed for 1.25 s — where the firmware is stuck (the pc of thread mode, the pc below the ADC interrupt, and whether scans still ran: tells a spinning task from an interrupt that keeps firing), is kept in AHB SRAM and logged as `previous run: …` by the next start of the app. Panic and watchdog reset both end in the UF2 loader; the record survives that as long as the board stays powered, so flash again (or let the loader start the app) **without replugging**, then read `tools/console.py` |
 | `cargo build --release --features key-log` | log the HID report and every active key object (thresholds, travel, raw) on each HID change |
 
 Debug commands on the vendor interface (`app/src/debug/mod.rs`): request
@@ -149,7 +149,7 @@ stock dispatcher unchanged.
 ## Console output
 
 Boot banner, `previous run: …` if the last run left a crash record, clocks, reset flags, flash
-init result, UID, config load result, `usb: configured, high speed`, a `flash: … saved` line
+init result, UID, config load result, `usb: bus reset` / `usb: configured, high speed`, a `flash: … saved` line
 after config writes, and every 5 s:
 
 ```
