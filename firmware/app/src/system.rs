@@ -227,6 +227,7 @@ impl Write for Blocking {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     riscv::interrupt::disable();
+    console::record_crash(format_args!("{}", info));
     let _ = write!(Blocking, "\r\n*** PANIC: {}\r\n*** entering UF2 loader\r\n", info);
     console::flush_blocking();
     enter_bootloader()

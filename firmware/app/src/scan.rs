@@ -401,6 +401,8 @@ fn capture_step() {
 #[allow(non_snake_case)]
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::GPTMR1)]
 fn GPTMR1() {
+    // Where thread mode (or a lower context) was interrupted: the stall watchdog reports it.
+    let interrupted_pc = riscv::register::mepc::read() as u32;
     let t = pac::GPTMR1;
     t.channel(0).cr().write(|w| w.0 = 0x208); // stop
     t.sr().write(|w| w.0 = 1);
@@ -415,7 +417,9 @@ fn GPTMR1() {
         unsafe { riscv::interrupt::enable() };
         process_frames();
         riscv::interrupt::disable();
-        crate::probe_isr(STATS.scans.load(Relaxed));
+        let scans = STATS.scans.load(Relaxed);
+        crate::probe_isr(scans);
+        crate::stall_check(scans, interrupted_pc);
         IN_PROCESS.store(false, Relaxed);
     }
     plic::complete(hpm_hal::interrupt::GPTMR1);

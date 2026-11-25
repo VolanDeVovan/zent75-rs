@@ -87,6 +87,27 @@ pub fn probe_isr(scans: u32) {
     system::enter_bootloader_after(bits * 1000);
 }
 
+/// Thread-mode stall detector, run from the scan interrupt once per second: if `health_task`
+/// has not run for ~1.5 s, record where thread mode is stuck (the EWDG0 reset follows and the
+/// next boot logs it; see `console::report_previous_crash`).
+pub fn stall_check(scans: u32, pc: u32) {
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    static LAST_BEAT: AtomicU32 = AtomicU32::new(u32::MAX);
+    static STALLED: AtomicU32 = AtomicU32::new(0);
+    if scans % 4000 != 0 {
+        return;
+    }
+    let beat = THREAD_BEAT.load(Relaxed);
+    if beat != LAST_BEAT.swap(beat, Relaxed) {
+        STALLED.store(0, Relaxed);
+        return;
+    }
+    if STALLED.fetch_add(1, Relaxed) == 2 {
+        console::record_crash(format_args!("thread mode stalled at pc {:#010x}", pc));
+        log!("thread mode stalled at pc {:#010x}", pc);
+    }
+}
+
 /// Config saves are debounced: a burst of `BE 03` writes becomes one erase per slot.
 const SAVE_DEBOUNCE_MS: u64 = 300;
 /// RGB refresh period (100 Hz; a frame takes 2.7 ms on the wire).
@@ -239,6 +260,7 @@ async fn main(spawner: Spawner) -> ! {
         env!("CARGO_PKG_VERSION"),
         zent_core::device::VERSION
     );
+    console::report_previous_crash();
     let clk = hal::sysctl::clocks();
     log!("cpu {} Hz, ahb {} Hz", clk.cpu0.0, clk.ahb.0);
     system::check_reset_cause(); // may divert to the UF2 loader after a watchdog reset

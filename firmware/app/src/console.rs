@@ -8,6 +8,7 @@
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use critical_section::Mutex;
 use hpm_hal::pac;
@@ -31,6 +32,41 @@ static SYNC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::ne
 /// Switch from synchronous boot logging to the buffered ring drained by [`drain`].
 pub fn go_async() {
     SYNC.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Everything ever logged, last [`HIST`] bytes kept (never drained): read over USB with the
+/// debug vendor command (`usb.rs`, `tools/console.py`), so no UART is needed.
+const HIST: usize = 4096;
+struct History {
+    buf: [u8; HIST],
+    /// Total bytes ever written; byte `n` lives at `buf[n % HIST]` while `n + HIST > total`.
+    total: u32,
+}
+static HISTORY: Mutex<RefCell<History>> = Mutex::new(RefCell::new(History { buf: [0; HIST], total: 0 }));
+
+/// Copy history bytes from position `from` into `out`; returns (total, first position copied,
+/// bytes copied). Positions older than the kept window are skipped.
+pub fn history(from: u32, out: &mut [u8]) -> (u32, u32, usize) {
+    critical_section::with(|cs| {
+        let h = HISTORY.borrow_ref(cs);
+        let start = from.max(h.total.saturating_sub(HIST as u32));
+        let n = (h.total.saturating_sub(start) as usize).min(out.len());
+        for (i, b) in out[..n].iter_mut().enumerate() {
+            *b = h.buf[(start as usize + i) % HIST];
+        }
+        (h.total, start, n)
+    })
+}
+
+fn remember(bytes: &[u8]) {
+    critical_section::with(|cs| {
+        let mut h = HISTORY.borrow_ref_mut(cs);
+        for &b in bytes {
+            let i = h.total as usize % HIST;
+            h.buf[i] = b;
+            h.total = h.total.wrapping_add(1);
+        }
+    });
 }
 
 static LOG: Mutex<RefCell<Ring>> = Mutex::new(RefCell::new(Ring { buf: [0; RING], head: 0, len: 0, dropped: 0 }));
@@ -91,6 +127,15 @@ pub fn write_fmt(args: fmt::Arguments) {
             r.len += n;
         }
     });
+    // The history gets the text even when the UART ring was full.
+    struct Hist;
+    impl Write for Hist {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            remember(s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = Hist.write_fmt(args);
     if SYNC.load(core::sync::atomic::Ordering::Relaxed) {
         flush_blocking();
     }
@@ -156,6 +201,65 @@ pub fn flush_blocking() {
     let mut spins = 0u32;
     while pac::UART0.lsr().read().0 & (1 << 6) == 0 && spins < 5_000_000 {
         spins += 1; // TEMT
+    }
+}
+
+// ------------------------------------------------------------------ crash record
+
+/// Panic text kept across the jump to the loader and the next boot, in AHB SRAM, which the
+/// startup code neither loads nor zeroes. Plain atomic words (any bit pattern is a valid value),
+/// checked by magic + length + checksum, so leftover garbage is never reported.
+/// Layout: [0] magic, [1] length in bytes, [2] checksum, [3..] text (4 bytes per word, LE).
+const CRASH_WORDS: usize = 3 + 120;
+const CRASH_MAGIC: u32 = 0x5A43_5253;
+#[unsafe(link_section = ".ahb_sram")]
+static CRASH: [AtomicU32; CRASH_WORDS] = [const { AtomicU32::new(0) }; CRASH_WORDS];
+const CRASH_TEXT: usize = 4 * (CRASH_WORDS - 3);
+
+fn checksum(b: &[u8]) -> u32 {
+    b.iter().fold(0x811C_9DC5u32, |h, &x| (h ^ x as u32).wrapping_mul(0x0100_0193))
+}
+
+/// Record a panic / stall message (keeps the first 480 bytes).
+pub fn record_crash(args: fmt::Arguments) {
+    struct W {
+        buf: [u8; CRASH_TEXT],
+        len: usize,
+    }
+    impl Write for W {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            for &b in s.as_bytes() {
+                if self.len < self.buf.len() {
+                    self.buf[self.len] = b;
+                    self.len += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut w = W { buf: [0; CRASH_TEXT], len: 0 };
+    let _ = w.write_fmt(args);
+    for (i, c) in w.buf.chunks(4).enumerate() {
+        CRASH[3 + i].store(u32::from_le_bytes([c[0], c[1], c[2], c[3]]), Relaxed);
+    }
+    CRASH[1].store(w.len as u32, Relaxed);
+    CRASH[2].store(checksum(&w.buf[..w.len]), Relaxed);
+    CRASH[0].store(CRASH_MAGIC, Relaxed);
+}
+
+/// At boot: log a message recorded by the previous run (if any) and clear the record.
+pub fn report_previous_crash() {
+    let magic = CRASH[0].swap(0, Relaxed);
+    let len = CRASH[1].load(Relaxed) as usize;
+    if magic != CRASH_MAGIC || len > CRASH_TEXT {
+        return;
+    }
+    let mut text = [0u8; CRASH_TEXT];
+    for (i, c) in text.chunks_mut(4).enumerate() {
+        c.copy_from_slice(&CRASH[3 + i].load(Relaxed).to_le_bytes());
+    }
+    if checksum(&text[..len]) == CRASH[2].load(Relaxed) {
+        crate::log!("previous run: {}", core::str::from_utf8(&text[..len]).unwrap_or("<non-utf8>"));
     }
 }
 
