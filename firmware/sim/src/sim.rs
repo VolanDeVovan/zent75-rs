@@ -499,7 +499,7 @@ impl Sim {
         );
         let _ = writeln!(s, "profile {}", self.kb.active_profile());
         let _ = writeln!(s, "uptime_ms {}", self.uptime_ms());
-        let _ = writeln!(s, "engine_ready {}", self.kb.engine.ready() as u8);
+        let _ = writeln!(s, "engine_ready {}", self.kb.engine_ready() as u8);
         let _ = writeln!(s, "hid {}", hid::describe(self.kb.hid()));
         if let Some(n) = &self.vendor_node {
             let _ = writeln!(s, "hidraw {}", n.display());
@@ -507,14 +507,14 @@ impl Sim {
         for k in 0..KEY_COUNT {
             let phys = self.sensor.travel(k);
             let tgt = self.sensor.target(k);
-            let t = self.kb.engine.travel[k];
+            let t = self.kb.travel_um(k);
             // idle keys show a few µm of noise; list only moving keys or real travel
             if phys > 0.0 || tgt > 0.0 || t >= 100 {
                 let _ = writeln!(
                     s,
                     "key {k} {} mm={phys:.3} target={tgt:.3} raw={} travel_um={t}",
                     keynames::name(k),
-                    self.kb.engine.raw[k]
+                    self.kb.raw(k)
                 );
             }
         }

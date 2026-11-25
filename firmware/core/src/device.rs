@@ -331,6 +331,23 @@ impl Keyboard {
     pub fn calibration_mode(&self) -> bool {
         self.calibration
     }
+
+    /// Current travel of `key` in µm (stable accessor; the engine internals may change).
+    pub fn travel_um(&self, key: usize) -> u16 {
+        self.engine.travel[key]
+    }
+    /// Filtered raw ADC count of `key`.
+    pub fn raw(&self, key: usize) -> u16 {
+        self.engine.raw[key]
+    }
+    /// True once the engine has its rest baseline.
+    pub fn engine_ready(&self) -> bool {
+        self.engine.ready()
+    }
+    /// USB bus suspended (or unconfigured): LEDs are blanked at the next frame, like stock.
+    pub fn set_usb_suspended(&mut self, suspended: bool) {
+        self.lighting.set_usb_suspended(suspended);
+    }
     pub fn keys_count() -> usize {
         KEY_COUNT
     }

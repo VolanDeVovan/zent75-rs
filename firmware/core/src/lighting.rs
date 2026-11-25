@@ -7,11 +7,15 @@ use crate::layout::LED_COUNT;
 
 pub struct Lighting {
     host_leds: u8,
+    usb_suspended: bool,
 }
 
 impl Lighting {
     pub const fn new() -> Self {
-        Self { host_leds: 0 }
+        Self { host_leds: 0, usb_suspended: false }
+    }
+    pub fn set_usb_suspended(&mut self, s: bool) {
+        self.usb_suspended = s;
     }
     pub fn configure(&mut self, _p: &Profile) {}
     pub fn on_scan(&mut self, _k: &KeyProcessor) {}
@@ -22,7 +26,7 @@ impl Lighting {
     pub fn brightness_trigger(&mut self, _addr: u32, _data: &[u8], _p: &mut Profile) {}
 
     pub fn render(&mut self, _now_ms: u32, p: &Profile, _k: &KeyProcessor, _e: &Engine, out: &mut [[u8; 3]; LED_COUNT]) {
-        let on = p.flag(b2::RGB_ENABLE);
+        let on = p.flag(b2::RGB_ENABLE) && !self.usb_suspended;
         let br = p.rgb_config()[3].min(30) as u16;
         for (i, o) in out.iter_mut().enumerate() {
             let c = p.led_rgb(i);
