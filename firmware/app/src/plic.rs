@@ -17,6 +17,8 @@ use hpm_hal::pac;
 pub const PRIO_ADC: Priority = Priority::P7;
 pub const PRIO_USB: Priority = Priority::P3;
 pub const PRIO_SCAN: Priority = Priority::P2;
+/// Profiler sampling timer (`prof.rs`): above everything it should see, below the ADC capture.
+pub const PRIO_PROF: Priority = Priority::P5;
 
 /// Enable PLIC preemptive-priority mode (stock: `PLIC.feature = 3`).
 pub fn setup() {

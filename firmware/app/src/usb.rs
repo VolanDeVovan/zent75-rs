@@ -380,6 +380,9 @@ type VendorIn = Mutex<NoopRawMutex, EpIn>;
 
 /// Debug console read (this firmware only, see `tools/console.py`).
 const CMD_CONSOLE: u8 = 0xD0;
+/// Profiler read / start (this firmware only, see `tools/profile.py`).
+const CMD_PROF_READ: u8 = 0xD1;
+const CMD_PROF_START: u8 = 0xD2;
 
 /// Vendor OUT 0x03 → `Keyboard::vendor_in` → reply on IN 0x82.
 #[embassy_executor::task]
@@ -404,6 +407,23 @@ async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn, store: StoreRef) 
             reply[4..8].copy_from_slice(&total.to_le_bytes());
             reply[8..12].copy_from_slice(&start.to_le_bytes());
             reply[12 + len] = 0xED;
+            let _ = tx.lock().await.write(&reply).await;
+            continue;
+        }
+        if n >= 9 && rx[0] == 0xBE && (rx[1] == CMD_PROF_READ || rx[1] == CMD_PROF_START) {
+            // Profiler (ours only): `BE D2 ...` starts a capture; `BE D1 09 00 <from u32> ED`
+            // → `BE D1 <len u16> <taken u32> <from u32> <pc u32 …> ED`.
+            let from = u32::from_le_bytes([rx[4], rx[5], rx[6], rx[7]]);
+            if rx[1] == CMD_PROF_START {
+                crate::prof::start();
+            }
+            let (taken, k) = crate::prof::samples(from, &mut reply[12..12 + 4 * 250]);
+            reply[0] = 0xBE;
+            reply[1] = rx[1];
+            reply[2..4].copy_from_slice(&((13 + 4 * k) as u16).to_le_bytes());
+            reply[4..8].copy_from_slice(&taken.to_le_bytes());
+            reply[8..12].copy_from_slice(&from.to_le_bytes());
+            reply[12 + 4 * k] = 0xED;
             let _ = tx.lock().await.write(&reply).await;
             continue;
         }

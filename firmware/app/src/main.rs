@@ -10,6 +10,7 @@ mod console;
 mod flash;
 mod kb;
 mod plic;
+mod prof;
 mod rgb;
 mod scan;
 mod system;
@@ -283,6 +284,7 @@ async fn main(spawner: Spawner) -> ! {
     let rgb = rgb::Rgb::new();
     scan::start(p.ADC0, p.ADC1);
     log!("scan started");
+    prof::init();
     probe(4);
     usb::start(spawner, p.USB0, p.PA24, p.PA25, store);
     log!("usb started");
