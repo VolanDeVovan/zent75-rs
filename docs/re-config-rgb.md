@@ -67,15 +67,15 @@ and the curve is non-decreasing.
 
 | Offset | Type | Field | Default |
 |---|---|---|---|
-| `000` | i16[88] | extra keycode layer A (copied to key struct +0x10) | 1000 |
-| `0B0` | i16[88] | extra keycode layer B (key struct +0x12) | 1000 |
+| `000` | i16[88] | tap-hold code, main layer (key struct +0x10; sent after 0.5 s held) | 1000 |
+| `0B0` | i16[88] | tap-hold code, Fn layer (key struct +0x12) | 1000 |
 | `160` / `210` | i16[88] | `key_map` / `key_map_fn` | §2 |
 | `2C0` / `370` | u16[88] | `press_th` / `return_th` (RT) | 50 / 30 |
 | `420` / `4D0` | u16[88] | `press_deadzone` / `return_deadzone` | 55 / 0 |
 | `580` / `630` | u16[88] | `norm_press_th` / `norm_return_th` | 1600 / 800 |
 | `6E0` | u8[88] | `key_mode` (0 normal, 1 RT, 2 a third handler `0x1085A`) | 0; profile 0: W,A,S,D (32,46,47,48) = 1 |
 | `738` | u8[88] | unknown, forced to `FF` on every profile load (`FUN_ram_000146AE`) | `FF` |
-| `790` / `7E8` | u8[88] | companions of layers A / B (key struct +0x14/+0x15) | 0 |
+| `790` / `7E8` | u8[88] | modifier masks of the main / Fn layer, ORed into report byte 0 while the key is pressed (key struct +0x14/+0x15) | 0 |
 | `840` | u16[88] | unknown, forced to `FFFF` on every load | `FFFF` |
 | `8F0` / `9A0` | u16[88] | unknown (written by reset, no reader found) | 100 / 100 |
 | `A50` | i16[88] | `key_cancel_code` (SOCD) | 1000 |
@@ -109,7 +109,7 @@ QMK-style LED flag mask (§5). Profiles 1–3 differ from profile 0 only in `rgb
    bank 1 is rewritten.
 2. Load profile `cur_param_num` (`FUN_ram_000146AE`): read both sectors, force `738..78F` and
    `840..8EF` to `FF`, apply the fixed Fn shortcuts (`FUN_ram_00013DF8`, §2).
-3. Validate (`FUN_ram_00011822`); invalid if `key_map` or `key_map_fn` is all `FFFF`, layer A[0] >
+3. Validate (`FUN_ram_00011822`); invalid if `key_map` or `key_map_fn` is all `FFFF`, tap-hold code[0] (signed) >
    1000, any of `press_th[0]`, `return_th[0]`, `norm_*[0]`, deadzones[0] > 5000, `key_mode[0]` > 10,
    `sleep` > 3600, `rgb_config` (u32) = `FFFFFFFF`, `key_cancel_code` all `FFFF`, any bind record
    invalid (`FUN_ram_00014804`), `C70` > 10 or `C71` > 10. Invalid → UART "flash last data invalid",

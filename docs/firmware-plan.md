@@ -5,7 +5,7 @@ Rust on **embassy + `hpm-hal`** (feature `hpm5361`), target `riscv32imafc-unknow
 
 | Part | Status |
 |---|---|
-| `core/` — `zent-core`: config banks, engine, keys, lighting, protocol; `Keyboard` API in `device.rs` | engine / keys / lighting being rewritten from `algorithms.md` |
+| `core/` — `zent-core`: config banks, engine, keys, lighting, protocol; `Keyboard` API in `device/` | complete; diff-tested against the emulated stock firmware |
 | `app/` — board layer running `Keyboard` on the HPM5361 | complete first version, **not flashed**; needs the bring-up checklist below |
 | `sim/` — host simulator (uhid) | runs `Keyboard` with a sensor model |
 | `emu/` — unicorn pre-flash gate for our ELF | run before every flash |
@@ -63,11 +63,11 @@ https://github.com/tfx2001/hpm_isp
 Each step on the real keyboard only after `emu/run.py` passes, with a fresh `tools/dump_all.py`
 backup, and with the owner available for A+S+D. Watch UART0 (PA00, 115 200) if the case is open.
 
-1. **Boot + console + `BE FC`.** Banner, reset flags, flash geometry, UID, "config: … defaults
-   written for empty slots: false" (the stock banks must load as-is — if `true`, stop: the empty
-   rule in `flash.rs` rejected a stock bank). Then `BE FC` must land in the UF2 loader and the drive
-   must **stay** up > 10 s (proves EWDG0 is stopped before the jump; else set
-   `system::WATCHDOG_ENABLED = false`).
+1. **Boot + console + `BE FC`.** Banner, reset flags, `flash: 1 MB NOR ready`, UID, "config: …
+   defaults written for empty slots: false" (the stock banks must load as-is — if `true`, stop:
+   the empty rule in `core/src/storage/nor.rs` rejected a stock bank). Then `BE FC` must land in
+   the UF2 loader and the drive must **stay** up > 10 s (proves EWDG0 is stopped before the jump;
+   else set `system::WATCHDOG_ENABLED = false`).
 2. **USB enumeration at high speed** (`lsusb -v`: 36B0:357E, four interfaces, bInterval 1, HS),
    hidraw nodes, `BE 1D`/`BE 04` reads via `tools/` match the backup.
 3. **Scan sanity**: console `scan 8000/s`, `drop`/`miss`/`badch`/`adc1late` stay 0, `seq` min/max
@@ -77,7 +77,7 @@ backup, and with the owner available for A+S+D. Watch UART0 (PA00, 115 200) if t
    neighbour one mux step away, change `scan::STEP_OFFSET` (the open one-step question).
 5. **Typing**: NKRO report, modifiers, consumer keys, Caps LED (`SET_REPORT`).
 6. **Config write**: change one value in the panel + `BE 02`; console must show
-   `flash: saved …`; dump + `tools/restore.py` verify; replug; value persists. Then roll back with
+   `flash: 1 slot(s) saved, 0 failed, 0 refused since boot`; dump + `tools/restore.py` verify; replug; value persists. Then roll back with
    `tools/restore.py` and check stock 0.0.18 still reads the banks (`tools/rollback.sh` dry run).
 7. **RGB**: colours and GRB order correct, no flicker (SPI1 at 12 MHz assumed from a 24 MHz
    source; `rgb.rs` documents the alternative write-only SPI mode).

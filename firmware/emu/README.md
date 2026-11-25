@@ -13,6 +13,10 @@ uv run --with unicorn --with capstone --with pyelftools python emu/run.py zent75
 
 Exit code: `0` pass, `1` at least one FAIL, `2` cannot load the image.
 
+Run it twice before a flash: with `--backup` (the banks the unit really has: they must load
+without a single flash operation) and without (blank NOR: the firmware writes the factory images,
+which takes the whole erase / program / verify path through the flash gate).
+
 | Option | |
 |---|---|
 | `--ms N` | virtual run time (default 1200 ms) |
