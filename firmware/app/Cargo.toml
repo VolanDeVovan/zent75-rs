@@ -6,6 +6,14 @@ description = "Firmware for the HOVEY WORKS ZENT75-HE (HPM5361, RISC-V)"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# A `no_std` + `no_main` image has no test harness: keep `cargo clippy --all-targets` and
+# `cargo test` from trying to build one.
+[[bin]]
+name = "zent75-rs"
+path = "src/main.rs"
+test = false
+bench = false
+
 [dependencies]
 # HPMicro official embedded-Rust HAL; the MCU is an HPM5361 (docs/hardware.md).
 # Git dependency pinned to a known-good rev.
