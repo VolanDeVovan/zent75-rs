@@ -37,7 +37,7 @@ zent-sim: hidraw /dev/hidraw9
 | `--slew MM_PER_S` | key travel speed (default 200 mm/s ≈ 17 ms rest → bottom; 0 = instant) |
 | `--seed N` | per-key rest/bottom variation |
 | `--no-uhid` | no virtual device, control socket only |
-| `--hid-keyboard` | also create a keyboard/consumer/mouse device that **types into your desktop session**. Off by default; without it HID state changes are only logged (`zent-sim: hid mods=.. keys=..`) |
+| `--hid-keyboard` | also create a keyboard/consumer/mouse device that **types into your desktop session**. Off by default; without it HID state changes are only logged (`zent-sim: hid mods=.. keys=..`, once per 1 ms batch, plus `zent-sim: report 81 <16-byte hex> scan N` for every keyboard report the core sends, so one-scan reports such as a tap-hold tap are visible) |
 | `--sudo-chmod` | `sudo -n chmod 0666` the hidraw node when it appears (see permissions) |
 | `--bootloader-ms N` | how long the device stays away after `BE FC` (default 2000) |
 | `--verbose` | log every vendor request |
@@ -146,6 +146,9 @@ End-to-end test: `cd tools && uv run --with pytest python -m pytest -q tests/tes
 - **Node scripts** (`npm run smoke`, `write-check`): `panel/scripts/hidraw-transport.ts` filters on
   `productId === 0x357E`; they would need an opt-in like the Python tools (e.g. honour
   `ZENT_SIM`/`ZENT_HIDRAW` or accept `0x5A11`) to reach the simulator.
+- **`npm run sim-e2e`** (`panel/scripts/sim-e2e.ts`) starts the simulator itself, opens only the
+  node it prints (checked to be `36B0:5A11` in sysfs) and checks tap-hold, modifier masks,
+  `key_mode` 2 and a custom switch curve end to end through the panel's protocol layer.
 - The panel shows `soft_version` 1.0.18 (core `VERSION`), so the ≥ 0.0.18 features are enabled.
 
 ## Layout

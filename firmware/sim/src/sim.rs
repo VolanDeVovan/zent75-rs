@@ -207,6 +207,12 @@ impl Sim {
             let s = self.sensor.samples();
             self.kb.scan(&s);
             self.scans += 1;
+            // every keyboard report of this scan: a tap-hold tap lives for one scan only, shorter
+            // than the batch the `hid` line below summarises
+            for r in self.kb.keys().sent().iter().filter(|r| r.ep == 0x81) {
+                let hex: String = r.data[..r.len as usize].iter().map(|b| format!("{b:02x}")).collect();
+                log(format!("report 81 {hex} scan {}", self.scans));
+            }
             if !self.taps.is_empty() {
                 let now = self.scans;
                 let sensor = &mut self.sensor;
