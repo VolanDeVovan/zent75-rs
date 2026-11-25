@@ -313,8 +313,13 @@ impl Engine {
         self.autocal = p.0.get(B2_AUTO_CALIB) == Some(&1);
     }
 
-    /// Stock `FUN_10E28` engine init, run with the first samples: dead-zone signs, auto-cal
-    /// reference, the averages seen at power-up.
+    /// Stock `FUN_10E28` engine init with the samples read at power-up (before the scan
+    /// timer starts): dead-zone signs, auto-cal reference, initial averages. Without this call
+    /// the first scan's samples are used.
+    pub fn init_samples(&mut self, samples: &[u16; SLOT_COUNT]) {
+        self.init(samples);
+    }
+
     fn init(&mut self, samples: &[u16; N]) {
         for s in 0..N {
             let x = samples[s] as i32;
