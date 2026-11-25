@@ -43,14 +43,12 @@ impl KeyboardState {
     pub fn boot_report(&self) -> [u8; 8] {
         let mut r = [0u8; 8];
         r[0] = self.modifiers;
-        let mut n = 0;
-        for u in self.pressed() {
+        for (n, u) in self.pressed().enumerate() {
             if n == 6 {
                 r[2..8].fill(0x01);
                 break;
             }
             r[2 + n] = u;
-            n += 1;
         }
         r
     }

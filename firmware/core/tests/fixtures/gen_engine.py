@@ -189,6 +189,14 @@ def scenarios():
         press_cycle(s, J, ramp=12, hold=200, gap=200)         # fast
         press_cycle(s, F, lo=24000, ramp=40, hold=100, gap=100)  # partial
         out.append(s)
+    s = Scn('press_custom', [F, J], stream=True).all16(1, TYPE, 4095)   # custom record 0 (type 4)
+    press_cycle(s.seg(SETTLE), F, ramp=300)
+    out.append(s)
+    s = Scn('mixed_types', [F, J, K, SPACE], stream=True).b1(TYPE, u16s([k % 4 for k in range(88)]))
+    s.seg(SETTLE)
+    s.seg(200, F=(REST, 18000), J=(REST, 19000)).seg(300, K=(REST, 17500), Space=(REST, 22000)).seg(200)
+    s.seg(200, F=(18000, REST), J=(19000, REST), K=(17500, REST), Space=(22000, REST)).seg(600)
+    out.append(s)
     # ---- actuation
     s = Scn('normal_hysteresis', [F]).seg(SETTLE)
     s.seg(300, F=(REST, 25500))

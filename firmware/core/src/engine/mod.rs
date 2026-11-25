@@ -407,6 +407,21 @@ impl Engine {
         self.hc[OBJ_TO_SLOT[key] as usize]
     }
 
+    /// Current span (`(top − bottom − 2·dz)·65536/2636`) of a key.
+    pub fn span(&self, key: usize) -> i32 {
+        self.span[OBJ_TO_SLOT[key] as usize]
+    }
+
+    /// Auto-calibration bottom reference of a key (ADC counts; starts at the stored bottom).
+    pub fn autocal_ref(&self, key: usize) -> i32 {
+        self.act_ref[OBJ_TO_SLOT[key] as usize]
+    }
+
+    /// Dynamic rest baseline of a key (ADC counts).
+    pub fn rest_baseline(&self, key: usize) -> i32 {
+        self.base[OBJ_TO_SLOT[key] as usize]
+    }
+
     /// Per-scan velocity of a key (`hC` change, µm/scan, positive while pressing).
     pub fn velocity(&self, key: usize) -> i16 {
         self.vel[OBJ_TO_SLOT[key] as usize]

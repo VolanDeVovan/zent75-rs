@@ -81,7 +81,7 @@ pub fn parse(report: &[u8]) -> Result<Request<'_>, FrameError> {
         return Err(FrameError::BadSof);
     }
     let len = u16::from_le_bytes([r[2], r[3]]) as usize;
-    if len < 5 || len > REPORT_SIZE || len > r.len() {
+    if !(5..=REPORT_SIZE).contains(&len) || len > r.len() {
         return Err(FrameError::BadLen);
     }
     if r[len - 1] != EOF {
