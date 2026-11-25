@@ -330,10 +330,19 @@ unsafe fn ADC0() {
     STEPS_SEEN |= 1 << k;
 
     if k == STEP_COUNT - 1 {
-        if STEPS_SEEN != (1 << STEP_COUNT) - 1 {
+        let seen = STEPS_SEEN.count_ones();
+        STEPS_SEEN = 0;
+        if seen != STEP_COUNT as u32 {
             STATS.steps_missing.fetch_add(1, Ordering::Relaxed);
         }
-        STEPS_SEEN = 0;
+        // Publish only plausible frames: if step decoding ever breaks (e.g. the PWM0 counter
+        // reads a constant) we must not run Keyboard::scan once per *step* and starve the
+        // executor; the scan then stops visibly (console `scan 0/s`, `miss` counting up).
+        if seen < STEP_COUNT as u32 - 1 {
+            stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
+            hpm_hal::interrupt::ADC0.complete();
+            return;
+        }
         READY_IDX.store(w as u32, Ordering::Relaxed);
         READY_SEQ.fetch_add(1, Ordering::Release);
         WRITE_IDX = w ^ 1;
