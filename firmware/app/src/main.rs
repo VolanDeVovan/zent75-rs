@@ -112,6 +112,12 @@ async fn health_task() {
         system::watchdog_feed();
         Timer::after_millis(250).await;
         tick += 1;
+        if tick % 4 == 0 {
+            // BE FD tail: scans/s, engine busy per mille, uptime (stock words 499-504)
+            let cyc = scan::STATS.sec_cyc.swap(0, Ordering::Relaxed);
+            let busy = (cyc / (cpu_mhz * 1000).max(1)).min(1000) as u16;
+            with_kb(|kb| kb.engine.second_tick(busy));
+        }
         if tick % 20 != 0 {
             continue;
         }
