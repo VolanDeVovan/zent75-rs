@@ -17,6 +17,30 @@ pub const MATRIX: [[u8; MATRIX_COLS]; MATRIX_ROWS] = [
     [0, 1, 2, 3, NO_LED, 4, NO_LED, 5, NO_LED, 6, 7, 8, 9, 10, 11],
 ];
 
+/// Key → its matrix cells (`row·MATRIX_COLS + col`, row-major order; [`NO_LED`] = unused).
+/// Three for the space bar, one for every other key.
+pub const KEY_CELLS: [[u8; 3]; crate::layout::KEY_COUNT] = {
+    let mut out = [[NO_LED; 3]; crate::layout::KEY_COUNT];
+    let mut r = 0;
+    while r < MATRIX_ROWS {
+        let mut c = 0;
+        while c < MATRIX_COLS {
+            let led = MATRIX[r][c];
+            if led != NO_LED {
+                let k = crate::layout::LED_TO_KEY[led as usize] as usize;
+                let mut j = 0;
+                while out[k][j] != NO_LED {
+                    j += 1;
+                }
+                out[k][j] = (r * MATRIX_COLS + c) as u8;
+            }
+            c += 1;
+        }
+        r += 1;
+    }
+    out
+};
+
 /// LED position (x, y) (`0x8005A`): x 0..120 left→right, y 0 (top row) .. 42 (bottom row).
 pub const POINTS: [(u8, u8); LED_COUNT] = [
     (1, 42), (11, 42), (21, 42), (39, 42), (51, 42), (63, 42), (80, 42), (88, 42), (96, 42), (104, 42),

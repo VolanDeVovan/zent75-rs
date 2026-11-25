@@ -280,17 +280,17 @@ impl Lighting {
     /// Feed one key's state; a new press is registered with the reactive effects at the next
     /// frame (all matrix cells of the key, i.e. three for the space bar, like stock).
     pub fn press_key(&mut self, key: usize, down: bool) {
-        for (r, row) in MATRIX.iter().enumerate() {
-            for (c, &led) in row.iter().enumerate() {
-                if led == NO_LED || LED_TO_KEY[led as usize] as usize != key {
-                    continue;
-                }
-                let i = r * MATRIX_COLS + c;
-                if down && !self.pressed_cells[i] {
-                    self.new_press[i] = true;
-                }
-                self.pressed_cells[i] = down;
+        // precomputed cells: this runs for every key on every scan
+        let Some(cells) = geometry::KEY_CELLS.get(key) else { return };
+        for &i in cells {
+            if i == NO_LED {
+                break;
             }
+            let i = i as usize;
+            if down && !self.pressed_cells[i] {
+                self.new_press[i] = true;
+            }
+            self.pressed_cells[i] = down;
         }
     }
 
