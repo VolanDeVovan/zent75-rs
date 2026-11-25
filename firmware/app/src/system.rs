@@ -22,29 +22,25 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use hpm_hal::pac;
 
-use crate::console;
+use crate::{console, debug};
 
 /// Download loader ("Zent_DLD") base. Stock `BE FC` jumps here (word 0 is the signature, which
 /// decodes as two harmless compressed instructions; stage-0 itself uses +4).
-pub const LOADER_ENTRY: usize = 0x8002_0000;
+const LOADER_ENTRY: usize = 0x8002_0000;
 
 /// PPOR `RESET_FLAG` bit for EWDG0 (HPM5300 `ppor_reset_wdog0`, hpm_sdk). **Unverified on this
 /// board** — logged at every boot so it can be confirmed on hardware.
-pub const PPOR_FLAG_EWDG0: u32 = 1 << 16;
+const PPOR_FLAG_EWDG0: u32 = 1 << 16;
 /// PPOR software reset delay in 24 MHz ticks: 6 000 000 = 250 ms (stock value).
 const SOFT_RESET_TICKS: u32 = 6_000_000;
-/// Watchdog timeout. Longest legitimate stall: one NOR sector erase (typ. 45 ms, max ~400 ms);
-/// the flash code feeds the dog between sectors.
+/// Watchdog timeout. Longest legitimate stall of thread mode: one NOR sector erase (typ. 45 ms,
+/// max ~400 ms); the flash code feeds the dog between sectors.
 pub const WATCHDOG_TIMEOUT_MS: u64 = 2000;
-
-/// Raw PPOR reset flags found at boot (before clearing), for the banner / diagnostics.
-pub static RESET_FLAGS: AtomicU32 = AtomicU32::new(0);
 
 /// Read and clear the PPOR reset flags. If the previous reset was our watchdog, go to the
 /// loader instead of starting the app again. Call first thing after the console is up.
 pub fn check_reset_cause() {
     let flags = pac::PPOR.reset_flag().read().0;
-    RESET_FLAGS.store(flags, Ordering::Relaxed);
     pac::PPOR.reset_flag().write(|w| w.0 = flags); // W1C
     let still = pac::PPOR.reset_flag().read().0;
     crate::log!("reset flags 0x{:08x} (after clear 0x{:08x})", flags, still);
@@ -59,14 +55,10 @@ pub fn check_reset_cause() {
 
 // ------------------------------------------------------------------ watchdog
 
-/// Set to `false` to build without the watchdog (e.g. if bring-up shows EWDG0 cannot be stopped
-/// before entering the loader — see the bring-up checklist).
-pub const WATCHDOG_ENABLED: bool = true;
-
 /// Subsystems that were started; [`quiesce`] only touches those (a peripheral whose clock was
 /// never enabled must not be accessed).
-pub static STARTED: AtomicU32 = AtomicU32::new(0);
-pub const STARTED_WDG: u32 = 1 << 0;
+static STARTED: AtomicU32 = AtomicU32::new(0);
+const STARTED_WDG: u32 = 1 << 0;
 pub const STARTED_SCAN: u32 = 1 << 1;
 pub const STARTED_RGB: u32 = 1 << 2;
 pub const STARTED_USB: u32 = 1 << 3;
@@ -77,18 +69,21 @@ pub fn mark_started(bit: u32) {
 
 /// Arm EWDG0 (32 kHz clock, reset on timeout).
 pub fn watchdog_start(ewdg: hpm_hal::Peri<'static, hpm_hal::peripherals::EWDG0>) {
-    if !WATCHDOG_ENABLED {
-        return;
-    }
     // The driver has no Drop; it is fed through the raw register below from any context.
     let mut w = hpm_hal::ewdg::Watchdog::new(ewdg, hpm_hal::ewdg::Config::default());
     w.start(embassy_time::Duration::from_millis(WATCHDOG_TIMEOUT_MS));
     mark_started(STARTED_WDG);
 }
 
-/// Refresh EWDG0 (no-op if it is not running).
+/// Refresh EWDG0 (no-op if it is not running) and tell the stall detector that thread mode
+/// is alive. Thread mode only.
 #[inline]
 pub fn watchdog_feed() {
+    debug::crash::heartbeat();
+    watchdog_refresh();
+}
+
+fn watchdog_refresh() {
     const REFRESH_KEY: u32 = 0x5A45_524F;
     if STARTED.load(Ordering::Relaxed) & STARTED_WDG != 0 {
         pac::EWDG0.wdt_refresh_reg().write(|w| w.0 = REFRESH_KEY);
@@ -99,18 +94,18 @@ pub fn watchdog_feed() {
 /// stretch the timeout to the maximum (~256 s) so a UF2 copy can still finish.
 fn watchdog_stop() {
     let w = pac::EWDG0;
-    watchdog_feed();
+    watchdog_refresh();
     w.wdt_en().write(|r| r.set_wdog_en(false));
     if w.wdt_en().read().wdog_en() {
         w.ot_rst_val().write(|r| r.set_ot_rst_val(0xFFFF));
-        watchdog_feed();
+        watchdog_refresh();
     }
 }
 
 // ------------------------------------------------------------------ reset / loader
 
 /// Busy-wait using the cycle counter (works with interrupts off).
-pub fn delay_ms(ms: u32) {
+fn delay_ms(ms: u32) {
     let hz = hpm_hal::sysctl::clocks().cpu0.0 as u64;
     let start = riscv::register::mcycle::read64();
     let ticks = hz / 1000 * ms as u64;
@@ -162,15 +157,9 @@ fn quiesce() {
 
 /// Leave for the stock UF2 download loader (stock `BE FC`, `0x00015A0C`). Never returns.
 pub fn enter_bootloader() -> ! {
-    enter_bootloader_after(0)
-}
-
-/// [`enter_bootloader`] with `extra_ms` more delay before the jump (bring-up probes encode
-/// state in it; the watchdog is already stopped then).
-pub fn enter_bootloader_after(extra_ms: u32) -> ! {
     quiesce();
     // Stock waits 1 s here: lets the host notice the detach before the loader re-enumerates.
-    delay_ms(1000 + extra_ms);
+    delay_ms(1000);
     if STARTED.load(Ordering::Relaxed) & STARTED_USB != 0 {
         // Controller reset so the loader's USB stack starts from a clean state.
         let usb = pac::USB0;
@@ -227,7 +216,7 @@ impl Write for Blocking {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     riscv::interrupt::disable();
-    console::record_crash(format_args!("{}", info));
+    debug::crash::record(format_args!("{}", info));
     let _ = write!(Blocking, "\r\n*** PANIC: {}\r\n*** entering UF2 loader\r\n", info);
     console::flush_blocking();
     enter_bootloader()

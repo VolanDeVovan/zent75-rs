@@ -28,10 +28,10 @@ DEFAULT_ELF = os.path.join(os.path.dirname(HERE), "app", "target", "riscv32imafc
                            "release", "zent75-rs")
 HOOK_SYMBOLS = ("enter_bootloader", "EnterBootloader", "jump_to_bootloader", "jump_to_loader")
 
-# Firmware probes (firmware/app/src/scan.rs). Missing symbols just skip the related checks.
+# Firmware statistics the gate reads (firmware/app/src/scan.rs). Missing symbols just skip the related checks.
 STATS_SYMBOL = "zent75_rs::scan::STATS"
 STATS_FIELDS = ("scans dropped bad_channel hw_conflict adc1_late steps_missing proc_cyc_max "
-                "proc_cyc_sum proc_n adc_cyc_max seq_min seq_max").split()
+                "proc_cyc_sum proc_n adc_cyc_max seq_min seq_max late_steps busy_cyc").split()
 HID_GEN_SYMBOL = "zent75_rs::scan::LAST_GEN"  # written only when Keyboard::hid_generation moves
 SCAN_BUDGET = 60_000  # CPU cycles per 125 us scan at 480 MHz
 # Slot position inside a mux step -> (ADC, channel) (scan.rs / docs/hardware.md interleave)
@@ -190,7 +190,7 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
             elif stats["proc_cyc_max"] > budget:
                 m.note(WARN, "scan-budget", f"worst Keyboard::scan {stats['proc_cyc_max']} cycles > "
                        f"budget {budget}")
-        for k in ("bad_channel", "hw_conflict", "steps_missing"):
+        for k in ("bad_channel", "hw_conflict", "steps_missing", "late_steps"):
             if stats[k]:
                 m.note(WARN, "scan", f"scan statistic {k} = {stats[k]}")
     hid = getattr(m, "hid_watch", None)

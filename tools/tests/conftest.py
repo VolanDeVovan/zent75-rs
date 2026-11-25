@@ -32,6 +32,8 @@ class FakeKeyboard(threading.Thread):
         self.serial = bytes(range(0x10, 0x20))
         self.requests: list[bytes] = []  # raw 1025-byte reports as received
         self.saves = 0
+        self.debug_requests = 0
+        self.console = b""  # what a debug read returns (our firmware only)
         # fault injection
         self.drop_replies = 0  # swallow the next N replies
         self.corrupt_replies = 0  # flip a data byte (CRC then fails) in the next N read replies
@@ -101,6 +103,15 @@ class FakeKeyboard(threading.Thread):
                 self._reply(zentlib.encode_simple(zentlib.CMD_SWITCH_PROFILE, r[4]))
         elif cmd == zentlib.CMD_SERIAL:
             self._reply(bytes([0xBE, 0x1D, 21, 0]) + self.serial + b"\xED")
+        elif cmd in (zentlib.CMD_DEBUG_CONSOLE, zentlib.CMD_DEBUG_PROF_READ, zentlib.CMD_DEBUG_PROF_START):
+            self.debug_requests += 1
+            assert self.mem_global[0x212] >= 1, "debug command sent to a stock firmware"
+            assert n == 13 and r[4:8] == b"ZDBG"
+            arg = int.from_bytes(r[8:12], "little")
+            data = self.console[arg:arg + 1011]
+            self._reply(bytes([0xBE, cmd]) + (13 + len(data)).to_bytes(2, "little")
+                        + len(self.console).to_bytes(4, "little") + arg.to_bytes(4, "little")
+                        + data + b"\xED")
         elif cmd == zentlib.CMD_SAVE:
             self.saves += 1
             self.flash_profiles[self.active][:] = self.mem_profiles[self.active]

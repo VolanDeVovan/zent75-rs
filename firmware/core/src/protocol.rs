@@ -16,6 +16,8 @@ pub const DATA_OVERHEAD: usize = 13;
 /// Largest `n` the stock firmware accepts for `BE 03`/`BE 04`.
 pub const MAX_RW: usize = 512;
 
+/// Stock command bytes. `0xD0..=0xD2` are unused by stock and taken by the board layer's debug
+/// commands (`firmware/app/src/debug`), which never reach [`parse`]; here they stay unknown.
 pub mod cmd {
     pub const HEARTBEAT: u8 = 0x00;
     pub const READ_FLASH: u8 = 0x01;
@@ -290,6 +292,12 @@ mod tests {
         x[4] = 0;
         assert_eq!(parse(&x), Err(FrameError::BadEof));
         assert_eq!(parse(&host::simple(0x42)), Err(FrameError::Unknown(0x42)));
+        // the board layer's debug requests are no stock frames: the dispatcher drops them
+        for c in 0xD0..=0xD2u8 {
+            let mut f = [0u8; REPORT_SIZE];
+            f[..13].copy_from_slice(&[SOF, c, 13, 0, b'Z', b'D', b'B', b'G', 0, 0, 0, 0, EOF]);
+            assert_eq!(parse(&f), Err(FrameError::Unknown(c)));
+        }
     }
 
     #[test]

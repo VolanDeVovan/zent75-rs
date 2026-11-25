@@ -7,10 +7,10 @@
 //! Before flashing anything read docs/boot-recovery.md. Module map: firmware/README.md.
 
 mod console;
+mod debug;
 mod flash;
 mod kb;
 mod plic;
-mod prof;
 mod rgb;
 mod scan;
 mod system;
@@ -24,7 +24,7 @@ use embassy_time::{Instant, Timer};
 use hpm_hal as hal;
 use static_cell::ConstStaticCell;
 use zent_core::device::SystemAction;
-use zent_core::layout::LED_COUNT;
+use zent_core::layout::{LED_COUNT, STEP_COUNT};
 
 use crate::flash::{RomNor, Store};
 
@@ -40,74 +40,6 @@ static APP_BOOT_SIGNATURE: u32 = 0x0B4D_5475;
 static STORE: ConstStaticCell<RefCell<Store>> = ConstStaticCell::new(RefCell::new(Store::new(RomNor::new())));
 /// The thread-mode handle to [`STORE`].
 pub type StoreRef = &'static RefCell<Store>;
-
-/// Bring-up probe (`ZENT_PROBE=<n> ./package-uf2.sh`): jump to the UF2 loader at init stage
-/// `n`. Without a console this shows how far init gets: the loader enumerating proves the
-/// stage was reached, and the next probe can then be flashed without the recovery keys.
-/// Stages: 0 entry, 1 clocks + console, 2 watchdog + PLIC, 3 flash + config, 4 scan,
-/// 5 USB, 6 all tasks + 2 s running, 7 = 6 plus USB state encoded in the delay,
-/// 8 = USB/PHY state read from the scan interrupt (see [`probe_isr`]).
-const PROBE: Option<u8> = match option_env!("ZENT_PROBE") {
-    Some(s) if s.len() == 1 => Some(s.as_bytes()[0] - b'0'),
-    _ => None,
-};
-
-fn probe(stage: u8) {
-    if PROBE == Some(stage) {
-        log!("probe {}: jumping to the loader", stage);
-        console::flush_blocking();
-        system::enter_bootloader();
-    }
-}
-
-/// Thread-mode heartbeat for probe 8 (bumped by `health_task`).
-static THREAD_BEAT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-/// Probe 8, run from the scan interrupt (works even if thread mode hangs): 3 s after the scan
-/// starts, jump to the loader after 1 s per set bit weight — 1: USBCMD.RS, 2: USBMODE.CM is
-/// device, 4: PHY_STATUS.UTMI_CLK_VALID, 8: PHY_CTRL1.UTMI_CFG_RST_N, 16: thread mode alive.
-pub fn probe_isr(scans: u32) {
-    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
-    static BEAT_AT_2S: AtomicU32 = AtomicU32::new(u32::MAX);
-    if PROBE != Some(8) {
-        return;
-    }
-    if scans == 16_000 {
-        BEAT_AT_2S.store(THREAD_BEAT.load(Relaxed), Relaxed);
-    }
-    if scans < 24_000 {
-        return;
-    }
-    let r = hal::pac::USB0;
-    let bits = r.usbcmd().read().rs() as u32
-        | ((r.usbmode().read().cm() == 0b10) as u32) << 1
-        | (r.phy_status().read().utmi_clk_valid() as u32) << 2
-        | (r.phy_ctrl1().read().utmi_cfg_rst_n() as u32) << 3
-        | ((THREAD_BEAT.load(Relaxed) != BEAT_AT_2S.load(Relaxed)) as u32) << 4;
-    log!("probe 8: bits {:05b}", bits);
-    system::enter_bootloader_after(bits * 1000);
-}
-
-/// Thread-mode stall detector, run from the scan interrupt once per second: if `health_task`
-/// has not run for ~1.5 s, record where thread mode is stuck (the EWDG0 reset follows and the
-/// next boot logs it; see `console::report_previous_crash`).
-pub fn stall_check(scans: u32, pc: u32) {
-    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
-    static LAST_BEAT: AtomicU32 = AtomicU32::new(u32::MAX);
-    static STALLED: AtomicU32 = AtomicU32::new(0);
-    if scans % 4000 != 0 {
-        return;
-    }
-    let beat = THREAD_BEAT.load(Relaxed);
-    if beat != LAST_BEAT.swap(beat, Relaxed) {
-        STALLED.store(0, Relaxed);
-        return;
-    }
-    if STALLED.fetch_add(1, Relaxed) == 2 {
-        console::record_crash(format_args!("thread mode stalled at pc {:#010x}", pc));
-        log!("thread mode stalled at pc {:#010x}", pc);
-    }
-}
 
 /// Config saves are debounced: a burst of `BE 03` writes becomes one erase per slot.
 const SAVE_DEBOUNCE_MS: u64 = 300;
@@ -184,7 +116,7 @@ async fn rgb_task(mut rgb: rgb::Rgb) {
     }
 }
 
-/// Watchdog feeding + periodic statistics on the console.
+/// Watchdog feed every 250 ms, the `BE FD` tail every second, statistics every 5 s.
 #[embassy_executor::task]
 async fn health_task() {
     let cpu_mhz = hal::sysctl::clocks().cpu0.0 / 1_000_000;
@@ -192,51 +124,52 @@ async fn health_task() {
     let mut last_scans = 0u32;
     loop {
         system::watchdog_feed();
-        THREAD_BEAT.fetch_add(1, Ordering::Relaxed);
         Timer::after_millis(250).await;
         tick += 1;
         if tick % 4 == 0 {
             // BE FD tail: scans/s, engine busy per mille, uptime (stock words 499-504)
-            let cyc = scan::SEC_CYC.swap(0, Ordering::Relaxed);
-            let busy = (cyc / (cpu_mhz * 1000).max(1)).min(1000) as u16;
+            let cyc = scan::STATS.busy_cyc.swap(0, Ordering::Relaxed);
+            let busy = (cyc / (cpu_mhz * 1000)).min(1000) as u16;
             kb::with(|kb| kb.second_tick(busy));
         }
-        if tick % 20 != 0 {
-            continue;
-        }
-        let s = &scan::STATS;
-        let scans = s.scans.load(Ordering::Relaxed);
-        let n = s.proc_n.swap(0, Ordering::Relaxed).max(1);
-        let sum = s.proc_cyc_sum.swap(0, Ordering::Relaxed);
-        let pmax = s.proc_cyc_max.swap(0, Ordering::Relaxed);
-        let amax = s.adc_cyc_max.swap(0, Ordering::Relaxed);
-        let (smin, smax) = (s.seq_min.swap(u32::MAX, Ordering::Relaxed), s.seq_max.swap(0, Ordering::Relaxed));
-        // Budget per 125 µs scan: one processing run + 11 ADC captures.
-        let avg_us10 = sum / n * 10 / cpu_mhz;
-        let busy_pct = (sum / n + 11 * amax) * 100 / (125 * cpu_mhz);
-        log!(
-            "scan {}/s avg {}.{} us max {} us/scan, adc isr max {} cyc, cpu ~{}% | seq {}..{} ticks | drop {} miss {} late {} badch {} cflct {} adc1late {}",
-            (scans - last_scans) / 5,
-            avg_us10 / 10,
-            avg_us10 % 10,
-            pmax / cpu_mhz,
-            amax,
-            busy_pct,
-            smin,
-            smax,
-            s.dropped.load(Ordering::Relaxed),
-            s.steps_missing.load(Ordering::Relaxed),
-            scan::LATE_STEPS.load(Ordering::Relaxed),
-            s.bad_channel.load(Ordering::Relaxed),
-            s.hw_conflict.load(Ordering::Relaxed),
-            s.adc1_late.load(Ordering::Relaxed),
-        );
-        last_scans = scans;
-        if tick % 240 == 0 {
-            let f = scan::last_frame();
-            log!("frame[0..8] {:?} log-dropped {}", &f[..8], console::dropped());
+        if tick % 20 == 0 {
+            let scans = scan::STATS.scans.load(Ordering::Relaxed);
+            log_stats((scans.wrapping_sub(last_scans)) / 5, cpu_mhz);
+            last_scans = scans;
         }
     }
+}
+
+/// One statistics line (format: firmware/README.md, "Console output"). Resets the per-report
+/// maxima.
+fn log_stats(scans_per_s: u32, cpu_mhz: u32) {
+    let s = &scan::STATS;
+    let take = |a: &core::sync::atomic::AtomicU32, reset: u32| a.swap(reset, Ordering::Relaxed);
+    let count = |a: &core::sync::atomic::AtomicU32| a.load(Ordering::Relaxed);
+    let avg = take(&s.proc_cyc_sum, 0) / take(&s.proc_n, 0).max(1);
+    let (max, adc_max) = (take(&s.proc_cyc_max, 0), take(&s.adc_cyc_max, 0));
+    let (seq_min, seq_max) = (take(&s.seq_min, u32::MAX), take(&s.seq_max, 0));
+    // Share of the 125 µs scan period: one processing run + 11 ADC captures.
+    let cpu_pct = (avg + STEP_COUNT as u32 * adc_max) * 100 / (125 * cpu_mhz);
+    let avg_us10 = avg * 10 / cpu_mhz;
+    log!(
+        "scan {}/s avg {}.{} max {} us | adc isr max {} cyc | cpu {}% | seq {}..{} ticks | drop {} miss {} late {} badch {} cflct {} adc1late {} logdrop {}",
+        scans_per_s,
+        avg_us10 / 10,
+        avg_us10 % 10,
+        max / cpu_mhz,
+        adc_max,
+        cpu_pct,
+        seq_min,
+        seq_max,
+        count(&s.dropped),
+        count(&s.steps_missing),
+        count(&s.late_steps),
+        count(&s.bad_channel),
+        count(&s.hw_conflict),
+        count(&s.adc1_late),
+        console::dropped(),
+    );
 }
 
 /// Load the config banks into the static keyboard (in place, see `kb`). Nothing else uses
@@ -253,24 +186,17 @@ fn boot_keyboard(uid: [u8; 16], store: StoreRef) {
 
 #[embassy_executor::main(entry = "hpm_hal::entry")]
 async fn main(spawner: Spawner) -> ! {
-    probe(0);
     let p = hal::init(clock_config());
     console::init();
-    probe(1);
     log!("");
-    log!(
-        "ZENT75-HE zent75-rs {} (protocol version {:?})",
-        env!("CARGO_PKG_VERSION"),
-        zent_core::device::VERSION
-    );
-    console::report_previous_crash();
+    log!("ZENT75-HE zent75-rs {} (protocol version {:?})", env!("CARGO_PKG_VERSION"), zent_core::device::VERSION);
+    debug::crash::report_previous();
     let clk = hal::sysctl::clocks();
     log!("cpu {} Hz, ahb {} Hz", clk.cpu0.0, clk.ahb.0);
     system::check_reset_cause(); // may divert to the UF2 loader after a watchdog reset
     system::watchdog_start(p.EWDG0);
     plic::setup();
     spawner.spawn(console_task()).unwrap();
-    probe(2);
 
     let store: StoreRef = STORE.take();
     match store.borrow_mut().nor().init(p.XPI0) {
@@ -279,40 +205,19 @@ async fn main(spawner: Spawner) -> ! {
     }
     let uid = flash::read_uid();
     log!("uid {:02x?}", uid);
-
     boot_keyboard(uid, store);
-    probe(3);
 
     let rgb = rgb::Rgb::new();
     scan::start(p.ADC0, p.ADC1);
-    log!("scan started");
-    prof::init();
-    probe(4);
+    #[cfg(feature = "profiler")]
+    debug::prof::init();
     usb::start(spawner, p.USB0, p.PA24, p.PA25, store);
-    log!("usb started");
-    probe(5);
 
     spawner.spawn(service_task(store)).unwrap();
     spawner.spawn(rgb_task(rgb)).unwrap();
     spawner.spawn(health_task()).unwrap();
     log!("init done");
     console::go_async();
-    if PROBE == Some(6) {
-        Timer::after_secs(2).await;
-        probe(6);
-    }
-    if PROBE == Some(7) {
-        // USB state as a delay before the jump: +3 s OTGSC.ASV, +6 s OTGSC.AVV, +12 s USBCMD.RS
-        Timer::after_secs(2).await;
-        let r = hal::pac::USB0;
-        let (otg, run) = (r.otgsc().read(), r.usbcmd().read().rs());
-        let extra = 3 * otg.asv() as u64 + 6 * otg.avv() as u64 + 12 * run as u64;
-        log!("probe 7: asv {} avv {} rs {}", otg.asv(), otg.avv(), run);
-        Timer::after_secs(extra).await;
-        probe(7);
-    }
 
-    loop {
-        Timer::after_secs(3600).await;
-    }
+    core::future::pending().await
 }

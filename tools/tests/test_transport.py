@@ -152,3 +152,31 @@ def test_context_manager_closes(rig):
         pass
     assert z.fd == -1
     z.close()  # idempotent
+
+
+def test_debug_commands_are_never_sent_to_stock(rig):
+    z, kb = rig  # the fake reports 0.0.18
+    for _ in range(2):
+        with pytest.raises(zl.ZentError, match="not ours"):
+            z.debug_request(zl.CMD_DEBUG_CONSOLE, 0)
+    assert kb.debug_requests == 0
+    assert all(r[2] == zl.CMD_READ_RAM for r in kb.requests)
+
+
+def test_debug_request_round_trip_on_our_firmware(rig):
+    z, kb = rig
+    kb.mem_global[0x210:0x214] = bytes([18, 0, 1, 0])  # 1.0.18
+    kb.console = b"scan 8000/s\r\n" * 100
+    total, start, text = z.debug_request(zl.CMD_DEBUG_CONSOLE, 14)
+    assert (total, start) == (1300, 14) and text == kb.console[14:14 + 1011]
+    assert kb.requests[-1][1:14] == bytes.fromhex("bed00d00") + b"ZDBG" + bytes.fromhex("0e000000ed")
+
+
+def test_debug_frame_codec():
+    f = zl.encode_debug(zl.CMD_DEBUG_PROF_READ, 0x01020304)
+    assert f == bytes.fromhex("bed10d005a44424704030201ed")
+    reply = bytes.fromhex("bed1110002000000010000000a0b0c0ded").ljust(1024, b"\x00")
+    assert zl.decode_debug(reply, zl.CMD_DEBUG_PROF_READ) == (2, 1, bytes.fromhex("0a0b0c0d"))
+    assert zl.decode_debug(reply, zl.CMD_DEBUG_CONSOLE) is None
+    assert zl.decode_debug(zl.WRITE_ACK.ljust(1024, b"\x00"), zl.CMD_WRITE_RAM) is None
+    assert zl.is_our_firmware(bytes([18, 0, 1, 0])) and not zl.is_our_firmware(bytes([18, 0, 0, 0]))

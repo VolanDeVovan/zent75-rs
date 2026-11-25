@@ -235,6 +235,41 @@ def decode_stream(report: bytes, keys: int = N) -> Optional[StreamFrame]:
     return None
 
 
+# ---- debug commands of our Rust firmware (firmware/app/src/debug/mod.rs); never for stock
+
+CMD_DEBUG_CONSOLE = 0xD0  # arg: console position -> (bytes logged, position of payload, text)
+CMD_DEBUG_PROF_READ = 0xD1  # arg: first sample -> (samples taken, first sample, PCs as LE32)
+CMD_DEBUG_PROF_START = 0xD2  # starts a capture, then replies like PROF_READ
+DEBUG_SIGNATURE = b"ZDBG"
+DEBUG_REQUEST_LEN = 13
+DEBUG_REPLY_HEADER = 12
+#: soft_version major of our firmware (stock is 0.0.x); debug commands need at least this.
+OUR_FIRMWARE_MAJOR = 1
+
+
+def encode_debug(cmd: int, arg: int = 0) -> bytes:
+    """``BE <cmd> 0D 00 "ZDBG" <arg LE32> ED``."""
+    return (bytes([SOF, cmd, DEBUG_REQUEST_LEN, 0]) + DEBUG_SIGNATURE
+            + (arg & 0xFFFFFFFF).to_bytes(4, "little") + bytes([EOF]))
+
+
+def decode_debug(report: bytes, cmd: int) -> Optional[tuple[int, int, bytes]]:
+    """``BE <cmd> <len LE16> <a LE32> <b LE32> <payload> ED`` -> (a, b, payload), else None."""
+    r = normalize_report(report)
+    if len(r) < DEBUG_REPLY_HEADER + 1 or r[0] != SOF or r[1] != cmd:
+        return None
+    n = r[2] | r[3] << 8
+    if not DEBUG_REPLY_HEADER < n <= len(r) or r[n - 1] != EOF:
+        return None
+    return (int.from_bytes(r[4:8], "little"), int.from_bytes(r[8:12], "little"),
+            bytes(r[DEBUG_REPLY_HEADER:n - 1]))
+
+
+def is_our_firmware(version_raw: bytes) -> bool:
+    """True for a soft_version of our Rust firmware (major >= 1)."""
+    return len(version_raw) == 4 and version_raw[3] == 0 and version_raw[2] >= OUR_FIRMWARE_MAJOR
+
+
 def format_version(raw: bytes) -> str:
     """soft_version bytes ``<patch> <minor> <major> 00`` -> "major.minor.patch"."""
     return f"{raw[2]}.{raw[1]}.{raw[0]}"
@@ -525,6 +560,26 @@ class Zent:
     def calibration(self, on: bool) -> None:
         """``BE FE <1/0>``: calibration mode (the stream turns into 6-scan raw frames)."""
         self.simple(CMD_CALIBRATION, 1 if on else 0)
+
+    def debug_request(self, cmd: int, arg: int = 0, timeout: float = 1.0) -> tuple[int, int, bytes]:
+        """One debug command of our Rust firmware -> ``(a, b, payload)`` (see `decode_debug`).
+
+        The stock firmware never gets these frames: the first call reads soft_version and
+        every call raises :class:`ZentError` unless it is ours (major >= 1; stock is 0.0.x).
+        """
+        if getattr(self, "_debug_ok", None) is None:
+            self._debug_version = self.version_raw()
+            self._debug_ok = is_our_firmware(self._debug_version)
+        if not self._debug_ok:
+            raise ZentError(f"firmware {format_version(self._debug_version)} is not ours: "
+                            f"debug command {cmd:#04x} not sent")
+        self.drain()
+        self.send(encode_debug(cmd, arg))
+        r = self.wait(lambda t: decode_debug(t, cmd), timeout)
+        if r is None:
+            raise ZentError(f"no reply to debug command {cmd:#04x} "
+                            "(firmware built without that feature?)")
+        return r
 
     def version_raw(self) -> bytes:
         """soft_version: ``<patch> <minor> <major> 00``."""

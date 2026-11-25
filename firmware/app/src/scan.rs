@@ -28,11 +28,11 @@ use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering::Relaxed};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use hpm_hal::interrupt::InterruptExt;
+use hpm_hal::interrupt::{self, InterruptExt};
 use hpm_hal::pac;
 use zent_core::layout::{INPUTS_PER_STEP, SLOT_COUNT, STEP_COUNT};
 
-use crate::{kb, plic};
+use crate::{debug, kb, plic};
 
 /// **Step ↔ sample association.** The samples captured after the trigger in PWM step `k`
 /// are filed as scan step `(k + STEP_OFFSET) % 11`. `0` = "a sample belongs to the address that
@@ -160,27 +160,36 @@ pub fn signal_hid() {
 // ------------------------------------------------------------------ statistics
 
 /// Counters for the console and the emu gate, which reads this struct by layout: keep the
-/// field order (`firmware/emu/run.py`, `STATS_FIELDS`).
+/// field order in step with `STATS_FIELDS` in `firmware/emu/run.py`.
 #[repr(C)]
 pub struct Stats {
+    /// Frames processed since boot.
     pub scans: AtomicU32,
+    /// Frames published but never processed (processing fell behind).
     pub dropped: AtomicU32,
+    /// Captures whose DMA buffer did not end with the last channel of the sequence.
     pub bad_channel: AtomicU32,
+    /// ADC triggers that arrived while a sequence was still running.
     pub hw_conflict: AtomicU32,
+    /// Captures where ADC1 had not finished when ADC0's interrupt ran.
     pub adc1_late: AtomicU32,
+    /// Frames that ended with a mux step not seen.
     pub steps_missing: AtomicU32,
+    /// `Keyboard::scan` cost in CPU cycles: maximum, sum and count since the last report.
     pub proc_cyc_max: AtomicU32,
     pub proc_cyc_sum: AtomicU32,
     pub proc_n: AtomicU32,
+    /// Longest ADC capture handler since the last report, in CPU cycles.
     pub adc_cyc_max: AtomicU32,
+    /// Trigger → capture-handler latency since the last report, in PWM ticks.
     pub seq_min: AtomicU32,
     pub seq_max: AtomicU32,
+    /// Mux steps dropped because the capture handler ran too late ([`LATEST_TICKS`]).
+    pub late_steps: AtomicU32,
+    /// `Keyboard::scan` cycles since the last once-per-second read (`BE FD` busy word).
+    pub busy_cyc: AtomicU32,
 }
-/// Processing cycles since the last once-per-second read (BE FD busy word). Not in [`Stats`]:
-/// the emu gate reads that struct by layout.
-pub static SEC_CYC: AtomicU32 = AtomicU32::new(0);
-/// Mux steps dropped because the capture ISR ran too late ([`LATEST_TICKS`]).
-pub static LATE_STEPS: AtomicU32 = AtomicU32::new(0);
+
 pub static STATS: Stats = Stats {
     scans: AtomicU32::new(0),
     dropped: AtomicU32::new(0),
@@ -194,6 +203,8 @@ pub static STATS: Stats = Stats {
     adc_cyc_max: AtomicU32::new(0),
     seq_min: AtomicU32::new(u32::MAX),
     seq_max: AtomicU32::new(0),
+    late_steps: AtomicU32::new(0),
+    busy_cyc: AtomicU32::new(0),
 };
 
 #[inline(always)]
@@ -297,9 +308,9 @@ pub fn start(adc0: hpm_hal::Peri<'static, hpm_hal::peripherals::ADC0>, adc1: hpm
     t.irqen().write(|w| w.0 = 1); // ch0 reload
 
     // Interrupts: ADC0 captures (ADC1 is polled from the same ISR), GPTMR1 processes.
-    hpm_hal::interrupt::ADC1.disable();
-    plic::enable(hpm_hal::interrupt::GPTMR1, plic::PRIO_SCAN);
-    plic::enable(hpm_hal::interrupt::ADC0, plic::PRIO_ADC);
+    interrupt::ADC1.disable();
+    plic::enable(interrupt::GPTMR1, plic::PRIO_SCAN);
+    plic::enable(interrupt::ADC0, plic::PRIO_ADC);
 
     crate::system::mark_started(crate::system::STARTED_SCAN);
     // Start both timers back to back (stock: not hardware-synchronised either).
@@ -345,7 +356,7 @@ fn ADC0() {
     let c0 = cycles();
     capture_step();
     stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
-    plic::complete(hpm_hal::interrupt::ADC0);
+    interrupt::ADC0.complete();
 }
 
 #[inline(always)]
@@ -374,7 +385,7 @@ fn capture_step() {
     stat_max(&STATS.seq_max, late);
     let torn = late > LATEST_TICKS;
     if torn {
-        LATE_STEPS.fetch_add(1, Relaxed);
+        STATS.late_steps.fetch_add(1, Relaxed);
     }
 
     // Sanity: the last word of each buffer must be the last channel of the sequence.
@@ -416,7 +427,7 @@ fn capture_step() {
 #[allow(non_snake_case)]
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::GPTMR1)]
 fn GPTMR1() {
-    // Where thread mode (or a lower context) was interrupted: the stall watchdog reports it.
+    // Where thread mode (or a lower context) was interrupted: the stall detector reports it.
     let interrupted_pc = riscv::register::mepc::read() as u32;
     let t = pac::GPTMR1;
     t.channel(0).cr().write(|w| w.0 = 0x208); // stop
@@ -432,12 +443,10 @@ fn GPTMR1() {
         unsafe { riscv::interrupt::enable() };
         process_frames();
         riscv::interrupt::disable();
-        let scans = STATS.scans.load(Relaxed);
-        crate::probe_isr(scans);
-        crate::stall_check(scans, interrupted_pc);
+        debug::crash::stall_check(STATS.scans.load(Relaxed), interrupted_pc);
         IN_PROCESS.store(false, Relaxed);
     }
-    plic::complete(hpm_hal::interrupt::GPTMR1);
+    interrupt::GPTMR1.complete();
 }
 
 /// Run `Keyboard::scan` on every frame published since the last call (normally one).
@@ -467,8 +476,11 @@ fn process_frames() {
         let gen = kb::with(|kb| {
             kb.scan(&frame);
             let gen = kb.hid_generation();
-            if DEBUG_KEYS && gen != LAST_GEN.load(Relaxed) {
-                log_key_change(kb);
+            #[cfg(feature = "key-log")]
+            {
+                if gen != LAST_GEN.load(Relaxed) {
+                    debug::log_key_change(kb);
+                }
             }
             gen
         });
@@ -476,36 +488,11 @@ fn process_frames() {
         stat_max(&STATS.proc_cyc_max, dc);
         STATS.proc_cyc_sum.fetch_add(dc, Relaxed);
         STATS.proc_n.fetch_add(1, Relaxed);
-        SEC_CYC.fetch_add(dc, Relaxed);
+        STATS.busy_cyc.fetch_add(dc, Relaxed);
         STATS.scans.fetch_add(1, Relaxed);
         if gen != LAST_GEN.load(Relaxed) {
             LAST_GEN.store(gen, Relaxed);
             signal_hid();
         }
     }
-}
-
-/// Log which key objects are active whenever the HID state changes (bring-up diagnostics).
-const DEBUG_KEYS: bool = false;
-
-fn log_key_change(kb: &zent_core::device::Keyboard) {
-    let hid = kb.hid();
-    crate::log!("hid {:02x?}", &hid.keyboard[..]);
-    let keys = kb.keys();
-    for k in 0..zent_core::layout::SLOT_COUNT {
-        let o = keys.object(k);
-        if o.pressed != 0 || o.th != 0 || o.edge_p || o.edge_r {
-            crate::log!(
-                " obj {} code {} pressed {} th {} mode {} h {} raw {} p {} r {} top {} bot {} low {} peak {} press_th {} ret_th {}",
-                k, o.code[0], o.pressed, o.th, o.key_mode, kb.engine().travel(k), kb.engine().raw(k),
-                o.p, o.r, o.top, o.bot, o.low, o.peak, o.press_th, o.return_th
-            );
-        }
-    }
-}
-
-/// Snapshot of the latest published frame (for diagnostics).
-pub fn last_frame() -> [u16; SLOT_COUNT] {
-    let published = &FRAMES[READY_IDX.load(Relaxed) as usize & 1];
-    core::array::from_fn(|i| published[i].load(Relaxed))
 }

@@ -1,8 +1,9 @@
-//! PLIC set-up: interrupt priorities, the hpm-hal workarounds, and the lock that keeps the
-//! scan-processing interrupt away from shared state.
+//! PLIC set-up: interrupt priorities and the lock that keeps the scan-processing interrupt away
+//! from shared state.
 //!
 //! ```text
 //! PLIC prio 7  ADC0 seq_cvc      per-step sample capture (deadline ~7 µs, never masked)
+//! PLIC prio 5  GPTMR0            profiler sample (feature `profiler`, only during a capture)
 //! PLIC prio 3  USB0              hpm-hal driver, wakes tasks (short)
 //! PLIC prio 2  GPTMR1            Keyboard::scan for each complete 88-sample frame; re-enables
 //!                                MIE so ADC0/USB0 preempt it (PLIC preemptive mode)
@@ -17,7 +18,9 @@ use hpm_hal::pac;
 pub const PRIO_ADC: Priority = Priority::P7;
 pub const PRIO_USB: Priority = Priority::P3;
 pub const PRIO_SCAN: Priority = Priority::P2;
-/// Profiler sampling timer (`prof.rs`): above everything it should see, below the ADC capture.
+/// Profiler sampling timer (`debug::prof`): above everything it should see, below the ADC
+/// capture.
+#[cfg(feature = "profiler")]
 pub const PRIO_PROF: Priority = Priority::P5;
 
 /// Enable PLIC preemptive-priority mode (stock: `PLIC.feature = 3`).
@@ -30,30 +33,12 @@ pub fn setup() {
     hpm_hal::interrupt::HDMA.disable();
 }
 
-/// Complete (end of service) a PLIC source with a plain *write* of the claim/complete register.
-/// Never use hpm-hal's `InterruptExt::complete()`: it is a read-modify-write, and reading that
-/// register claims the highest-priority pending source — e.g. finishing GPTMR1 (prio 2) while
-/// an ADC0 step (prio 7) is pending silently claims ADC0, which is then never serviced or
-/// completed, so the PLIC masks every source ≤ 7 forever and the scan stops.
-#[inline(always)]
-pub fn complete(irq: impl InterruptExt) {
-    pac::PLIC.targetconfig(0).claim().write(|w| w.set_interrupt_id(irq.number() as u16));
-}
-
-/// Set a PLIC source priority. Not `InterruptExt::set_priority`: hpm-hal 620f58d passes the IRQ
-/// number to metapac's `PLIC.priority(n)`, whose index 0 is *source 1* (register 0x04), so it
-/// programs the priority of the next source (ADC0 → ADC1's register) and leaves ours at its
-/// reset value. Here the register of source `n` is `PLIC + 4·n`, as in hpm_sdk.
-pub fn set_priority(irq: impl InterruptExt, prio: Priority) {
-    pac::PLIC.priority(irq.number() - 1).write(|w| w.set_priority(prio as u32));
-}
-
 /// Give `irq` its priority and unmask it. Call once its handler's state is ready.
 pub fn enable(irq: impl InterruptExt, prio: Priority) {
-    set_priority(irq, prio);
-    // SAFETY: unmasking a source is only unsafe in that its handler starts to run. Every
-    // handler in this firmware (`scan::ADC0`, `scan::GPTMR1`, `usb::USB0`) works on statics
-    // that are valid from reset and shares state only through atomics and `ScanLock`.
+    irq.set_priority(prio);
+    // SAFETY: unmasking a source is only unsafe in that its handler starts to run. The handlers
+    // enabled through here (`scan::ADC0`, `scan::GPTMR1`, `debug::prof::GPTMR0`) work on
+    // statics that are valid from reset and share state only through atomics and `ScanLock`.
     unsafe { irq.enable() };
 }
 

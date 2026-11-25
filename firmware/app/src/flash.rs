@@ -16,8 +16,6 @@
 //! duration of one ROM call (sector erase typ. 45 ms, page program < 1 ms), which pauses USB
 //! report *sending* but not key scanning.
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use hpm_hal::flash::{Config, Flash};
 use hpm_hal::peripherals::XPI0;
 use hpm_hal::Peri;
@@ -34,9 +32,6 @@ const FLASH_BASE: u32 = 0x8000_0000;
 const FLASH_SIZE: usize = 0x10_0000;
 /// Stock `auto_config` option (`{0xFCF90002, 0x00000006, 0x00001000}`).
 const NOR_OPTION: Config = Config { header: 0xFCF9_0002, option0: 0x0000_0006, option1: 0x0000_1000 };
-
-/// Erase/program requests stopped in front of the ROM call (should stay 0 forever; logged).
-pub static REFUSED: AtomicU32 = AtomicU32::new(0);
 
 pub struct RomNor {
     /// `None` until [`RomNor::init`] succeeded: config writes are disabled, reads still work.
@@ -63,7 +58,6 @@ impl RomNor {
     fn writable(addr: u32, len: u32) -> bool {
         let ok = check_write_range(addr, len);
         if !ok {
-            REFUSED.fetch_add(1, Ordering::Relaxed);
             log!("flash: REFUSED write 0x{:08x}+0x{:x}", addr, len);
         }
         ok

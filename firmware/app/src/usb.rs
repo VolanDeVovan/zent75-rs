@@ -26,10 +26,9 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
-use embassy_usb::driver::{
-    Endpoint as _, EndpointAddress, EndpointAllocError, EndpointIn, EndpointOut, EndpointType, Event, Unsupported,
-};
+use embassy_usb::driver::{Endpoint as _, EndpointAddress, EndpointIn, EndpointOut};
 use embassy_usb::{Builder, Handler};
+use hpm_hal::interrupt::InterruptExt;
 use hpm_hal::pac;
 use hpm_hal::peripherals;
 use hpm_hal::usb::{EndpointState, UsbDriver};
@@ -38,33 +37,13 @@ use zent_core::hid::{descriptor, HidReports};
 use zent_core::protocol::REPORT_SIZE;
 
 use crate::scan::HidSignal;
-use crate::{kb, log, plic, scan, StoreRef};
+use crate::{debug, kb, log, plic, scan, system, StoreRef};
 
-/// USB0 binding. Not `hpm_hal::bind_interrupts!`: its handler completes through hpm-hal's
-/// `complete()`, a read-modify-write of the PLIC claim register — the read *claims* any
-/// higher-priority pending source (ADC0), which is then never serviced or completed and
-/// stops the scan for good. See `plic::complete`.
-#[derive(Copy, Clone)]
-struct Irqs;
-// SAFETY: `Binding` promises that the driver's handler runs whenever USB0 fires. The `USB0`
-// vector below does exactly that (and nothing else but the PLIC completion).
-unsafe impl hpm_hal::interrupt::typelevel::Binding<hpm_hal::interrupt::typelevel::USB0, hpm_hal::usb::InterruptHandler<peripherals::USB0>>
-    for Irqs
-{
-}
+hpm_hal::bind_interrupts!(struct Irqs {
+    USB0 => hpm_hal::usb::InterruptHandler<peripherals::USB0>;
+});
 
-#[allow(non_snake_case)]
-#[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::USB0)]
-fn USB0() {
-    use hpm_hal::interrupt::typelevel::Handler;
-    // SAFETY: called from the USB0 vector only, which is the contract of `on_interrupt`.
-    unsafe {
-        <hpm_hal::usb::InterruptHandler<peripherals::USB0> as Handler<hpm_hal::interrupt::typelevel::USB0>>::on_interrupt()
-    };
-    plic::complete(hpm_hal::interrupt::USB0);
-}
-
-type Driver = AlwaysPowered<UsbDriver<'static, peripherals::USB0>>;
+type Driver = UsbDriver<'static, peripherals::USB0>;
 type EpIn = <Driver as embassy_usb::driver::Driver<'static>>::EndpointIn;
 type EpOut = <Driver as embassy_usb::driver::Driver<'static>>::EndpointOut;
 
@@ -89,99 +68,6 @@ const INTERFACES: [InterfaceDef; 4] = [
 
 fn hid_descriptor(bcd: u16, report_len: usize) -> [u8; 7] {
     [bcd as u8, (bcd >> 8) as u8, 0x00, 0x01, 0x22, report_len as u8, (report_len >> 8) as u8]
-}
-
-// ------------------------------------------------------------------ VBUS
-
-/// The keyboard is bus-powered and has no VBUS sense pin (VBUS/session valid are forced in
-/// PHY_CTRL0), so — like stock CherryUSB — power is simply always present.
-///
-/// hpm-hal's bus instead reports `OTGSC.ASV`: it reads 0 at the first `poll` (the override
-/// has not settled yet) and drops again when `Bus::enable` sets OTGSC.VD (VBUS discharge).
-/// embassy-usb answers `PowerRemoved` with `Bus::disable`, which resets the controller and
-/// the PHY — after which ASV never comes back and the board stays off the bus (seen on
-/// hardware with bring-up probes 7 and 8). This wrapper reports `PowerDetected` once and
-/// drops every later power event.
-struct AlwaysPowered<D>(D);
-
-impl<'a, D: embassy_usb::driver::Driver<'a>> embassy_usb::driver::Driver<'a> for AlwaysPowered<D> {
-    type EndpointOut = D::EndpointOut;
-    type EndpointIn = D::EndpointIn;
-    type ControlPipe = D::ControlPipe;
-    type Bus = AlwaysPoweredBus<D::Bus>;
-
-    fn alloc_endpoint_out(
-        &mut self,
-        ep_type: EndpointType,
-        ep_addr: Option<EndpointAddress>,
-        max_packet_size: u16,
-        interval_ms: u8,
-    ) -> Result<Self::EndpointOut, EndpointAllocError> {
-        self.0.alloc_endpoint_out(ep_type, ep_addr, max_packet_size, interval_ms)
-    }
-
-    fn alloc_endpoint_in(
-        &mut self,
-        ep_type: EndpointType,
-        ep_addr: Option<EndpointAddress>,
-        max_packet_size: u16,
-        interval_ms: u8,
-    ) -> Result<Self::EndpointIn, EndpointAllocError> {
-        self.0.alloc_endpoint_in(ep_type, ep_addr, max_packet_size, interval_ms)
-    }
-
-    fn start(self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
-        let (bus, pipe) = self.0.start(control_max_packet_size);
-        (AlwaysPoweredBus { bus, powered: false }, pipe)
-    }
-}
-
-struct AlwaysPoweredBus<B> {
-    bus: B,
-    powered: bool,
-}
-
-impl<B: embassy_usb::driver::Bus> embassy_usb::driver::Bus for AlwaysPoweredBus<B> {
-    async fn enable(&mut self) {
-        self.bus.enable().await
-    }
-
-    async fn disable(&mut self) {
-        self.bus.disable().await
-    }
-
-    async fn poll(&mut self) -> Event {
-        if !self.powered {
-            self.powered = true;
-            return Event::PowerDetected;
-        }
-        loop {
-            match self.bus.poll().await {
-                Event::PowerDetected | Event::PowerRemoved => continue,
-                e => return e,
-            }
-        }
-    }
-
-    fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
-        self.bus.endpoint_set_enabled(ep_addr, enabled)
-    }
-
-    fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
-        self.bus.endpoint_set_stalled(ep_addr, stalled)
-    }
-
-    fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
-        self.bus.endpoint_is_stalled(ep_addr)
-    }
-
-    fn force_reset(&mut self) -> Result<(), Unsupported> {
-        self.bus.force_reset()
-    }
-
-    async fn remote_wakeup(&mut self) -> Result<(), Unsupported> {
-        self.bus.remote_wakeup().await
-    }
 }
 
 // ------------------------------------------------------------------ control requests
@@ -222,7 +108,16 @@ impl Handler for HidHandler {
 
     fn configured(&mut self, configured: bool) {
         CONFIGURED.store(configured, Ordering::Relaxed);
-        log!("usb: configured={} speed={}", configured, pac::USB0.portsc1().read().pspd());
+        if configured {
+            let speed = match pac::USB0.portsc1().read().pspd() {
+                0 => "full",
+                1 => "low",
+                _ => "high",
+            };
+            log!("usb: configured, {} speed", speed);
+        } else {
+            log!("usb: deconfigured");
+        }
         if configured {
             // Resend current state on (re)configuration.
             scan::signal_hid();
@@ -378,13 +273,7 @@ async fn mouse_task(ep: EpIn) -> ! {
 
 type VendorIn = Mutex<NoopRawMutex, EpIn>;
 
-/// Debug console read (this firmware only, see `tools/console.py`).
-const CMD_CONSOLE: u8 = 0xD0;
-/// Profiler read / start (this firmware only, see `tools/profile.py`).
-const CMD_PROF_READ: u8 = 0xD1;
-const CMD_PROF_START: u8 = 0xD2;
-
-/// Vendor OUT 0x03 → `Keyboard::vendor_in` → reply on IN 0x82.
+/// Vendor OUT 0x03 → `Keyboard::vendor_in` (or one of our debug commands) → reply on IN 0x82.
 #[embassy_executor::task]
 async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn, store: StoreRef) -> ! {
     let mut rx = [0u8; REPORT_SIZE];
@@ -396,39 +285,9 @@ async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn, store: StoreRef) 
             Err(_) => continue,
         };
         reply.fill(0);
-        if n >= 9 && rx[0] == 0xBE && rx[1] == CMD_CONSOLE {
-            // Debug console read (ours only; never sent to stock): `BE D0 09 00 <from u32> ED`
-            // → `BE D0 <len u16> <total u32> <start u32> <text…> ED`.
-            let from = u32::from_le_bytes([rx[4], rx[5], rx[6], rx[7]]);
-            let (total, start, len) = crate::console::history(from, &mut reply[12..REPORT_SIZE - 1]);
-            reply[0] = 0xBE;
-            reply[1] = CMD_CONSOLE;
-            reply[2..4].copy_from_slice(&((13 + len) as u16).to_le_bytes());
-            reply[4..8].copy_from_slice(&total.to_le_bytes());
-            reply[8..12].copy_from_slice(&start.to_le_bytes());
-            reply[12 + len] = 0xED;
-            let _ = tx.lock().await.write(&reply).await;
-            continue;
-        }
-        if n >= 9 && rx[0] == 0xBE && (rx[1] == CMD_PROF_READ || rx[1] == CMD_PROF_START) {
-            // Profiler (ours only): `BE D2 ...` starts a capture; `BE D1 09 00 <from u32> ED`
-            // → `BE D1 <len u16> <taken u32> <from u32> <pc u32 …> ED`.
-            let from = u32::from_le_bytes([rx[4], rx[5], rx[6], rx[7]]);
-            if rx[1] == CMD_PROF_START {
-                crate::prof::start();
-            }
-            let (taken, k) = crate::prof::samples(from, &mut reply[12..12 + 4 * 250]);
-            reply[0] = 0xBE;
-            reply[1] = rx[1];
-            reply[2..4].copy_from_slice(&((13 + 4 * k) as u16).to_le_bytes());
-            reply[4..8].copy_from_slice(&taken.to_le_bytes());
-            reply[8..12].copy_from_slice(&from.to_le_bytes());
-            reply[12 + 4 * k] = 0xED;
-            let _ = tx.lock().await.write(&reply).await;
-            continue;
-        }
-        let replied = kb::with(|kb| kb.vendor_in(&rx[..n], &mut *store.borrow_mut(), &mut reply));
-        if replied.is_some() {
+        let replied = debug::vendor_command(&rx[..n], &mut reply)
+            || kb::with(|kb| kb.vendor_in(&rx[..n], &mut *store.borrow_mut(), &mut reply)).is_some();
+        if replied {
             let _ = tx.lock().await.write(&reply).await;
         }
     }
@@ -462,9 +321,9 @@ pub fn start(
     // image is DLM, which is not behind the D-cache (no `.noncacheable` placement needed).
     static EP_STATE: EndpointState = EndpointState::new();
 
-    crate::system::mark_started(crate::system::STARTED_USB);
-    let driver = AlwaysPowered(UsbDriver::new(usb0, Irqs, dm, dp, hpm_hal::usb::Config::default(), &EP_STATE));
-    plic::set_priority(hpm_hal::interrupt::USB0, plic::PRIO_USB);
+    system::mark_started(system::STARTED_USB);
+    hpm_hal::interrupt::USB0.set_priority(plic::PRIO_USB);
+    let driver = UsbDriver::new(usb0, Irqs, dm, dp, hpm_hal::usb::Config::default(), &EP_STATE);
 
     let mut config = embassy_usb::Config::new(VID, PID);
     config.bcd_usb = embassy_usb::UsbVersion::Two;

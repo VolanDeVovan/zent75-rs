@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Statistical CPU profile of our Rust firmware on the real board (see firmware/app/src/prof.rs).
+"""Statistical CPU profile of our Rust firmware on the real board (firmware/app/src/debug/prof.rs).
 
     uv run --with pyelftools python tools/profile.py [--elf PATH] [--captures N] [--top N]
 
-Starts GPTMR0 sampling (`BE D2`), reads the interrupted PCs (`BE D1`), and prints the share of
-samples per function of the ELF (default: the last release build). Version-checked: never sent
-to the stock firmware.
+Starts GPTMR0 sampling, reads the interrupted PCs and prints the share of samples per function
+of the ELF (default: the last release build — it must be the build that is running). Uses debug
+commands of our firmware; `zentlib` checks the firmware version first and never sends them to
+the stock firmware. The firmware needs its `profiler` feature (on by default).
 """
 from __future__ import annotations
 
@@ -19,32 +20,18 @@ from pathlib import Path
 
 import zentlib as zl
 
-CMD_PROF_READ, CMD_PROF_START = 0xD1, 0xD2
-SAMPLES = 2048  # firmware/app/src/prof.rs
 DEFAULT_ELF = Path(__file__).resolve().parent.parent / \
     "firmware/app/target/riscv32imafc-unknown-none-elf/release/zent75-rs"
 
 
-def request(z: zl.Zent, cmd: int, start: int) -> tuple[int, list[int]]:
-    z.drain()
-    z.send(bytes([0xBE, cmd, 9, 0]) + struct.pack("<I", start) + b"\xED")
-    end = time.monotonic() + 1.0
-    while time.monotonic() < end:
-        r = z.recv(0.1)
-        if r and r[:2] == bytes([0xBE, cmd]):
-            n = r[2] | r[3] << 8
-            taken, _ = struct.unpack_from("<II", r, 4)
-            k = (n - 13) // 4
-            return taken, list(struct.unpack_from(f"<{k}I", r, 12))
-    raise zl.ZentError("no profiler reply")
-
-
 def capture(z: zl.Zent) -> list[int]:
-    request(z, CMD_PROF_START, 0)
+    """One full capture: start, wait for the buffer to fill, read it out."""
+    z.debug_request(zl.CMD_DEBUG_PROF_START)
     time.sleep(0.6)
     pcs: list[int] = []
     while True:
-        taken, chunk = request(z, CMD_PROF_READ, len(pcs))
+        taken, _, raw = z.debug_request(zl.CMD_DEBUG_PROF_READ, len(pcs))
+        chunk = struct.unpack(f"<{len(raw) // 4}I", raw[:len(raw) & ~3])
         pcs += chunk
         if not chunk or len(pcs) >= taken:
             return pcs
@@ -80,13 +67,16 @@ def main() -> int:
     args = ap.parse_args()
     starts, syms = symbols(args.elf)
     pcs: list[int] = []
-    with zl.Zent() as z:
-        ver = z.version()
-        if not ver.startswith("1."):
-            print(f"firmware {ver} is not ours; profiler commands are not sent to it", file=sys.stderr)
-            return 2
-        for _ in range(args.captures):
-            pcs += capture(z)
+    try:
+        with zl.Zent() as z:
+            for _ in range(args.captures):
+                pcs += capture(z)
+    except zl.ZentError as e:
+        print(e, file=sys.stderr)
+        return 2
+    if not pcs:
+        print("no samples", file=sys.stderr)
+        return 1
     if args.dump:
         args.dump.write_text("".join(f"{pc:#x}\n" for pc in pcs))
     hits: collections.Counter[str] = collections.Counter()

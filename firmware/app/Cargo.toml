@@ -14,12 +14,21 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+default = ["profiler"]
+# Statistical CPU profiler (src/debug/prof.rs, tools/profile.py): GPTMR0 and 8 KB of AHB SRAM,
+# idle until a capture is started.
+profiler = []
+# Log every key object on each HID change (src/debug/mod.rs). Costs scan time: debugging only.
+key-log = []
+
 [dependencies]
-# HPMicro official embedded-Rust HAL; the MCU is an HPM5361 (docs/hardware.md).
-# Git dependency pinned to a known-good rev.
-hpm-hal = { git = "https://github.com/hpmicro/hpm-hal", rev = "620f58df241d541d5d5cb1575407a16351da49fd", features = [
+# HPMicro's embedded-Rust HAL; the MCU is an HPM5361 (docs/hardware.md). Upstream rev 620f58d
+# plus the fixes listed in ../hpm-hal/PATCHES.md.
+hpm-hal = { path = "../hpm-hal", default-features = false, features = [
     "rt",
     "embassy",
+    "time",
     "hpm5361",
     "usb-pin-reuse-hpm5300",
 ] }
@@ -64,7 +73,3 @@ debug = 2
 # optimisation made it ~2x slower than the 125 µs scan budget allows.
 [profile.release.package.zent-core]
 opt-level = 3
-
-# Local hpm-hal with USB fixes found on hardware (hpm-hal/PATCHES.md).
-[patch."https://github.com/hpmicro/hpm-hal"]
-hpm-hal = { path = "../hpm-hal" }

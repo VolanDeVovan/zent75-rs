@@ -24,6 +24,8 @@ pub fn with<R>(f: impl FnOnce(&mut Keyboard) -> R) -> R {
 /// is interpolated on the fly). 4 × 5.3 KB: too big for DLM, so in AHB SRAM, which the startup
 /// code neither loads nor zeroes.
 const HEIGHT_TABLES: usize = 4;
+// SAFETY: `.ahb_sram` is a NOLOAD RAM section of `zent-link.x`; the contents are uninitialised
+// until `attach_height_tables` zeroes them, hence `MaybeUninit`.
 #[unsafe(link_section = ".ahb_sram")]
 static mut TABLES: MaybeUninit<[HeightTable; HEIGHT_TABLES]> = MaybeUninit::uninit();
 static TABLES_TAKEN: AtomicBool = AtomicBool::new(false);
