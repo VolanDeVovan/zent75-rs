@@ -1,0 +1,18 @@
+[package]
+name = "zent-sim"
+version = "0.1.0"
+edition = "2024"
+description = "Host-side simulator for the ZENT75-HE firmware core: sensor model, virtual HID over /dev/uhid, control socket"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Self-contained: built for the host, never part of a workspace with the embedded `app` crate.
+[workspace]
+
+[[bin]]
+name = "zent-sim"
+path = "src/main.rs"
+
+[dependencies]
+zent-core = { path = "../core", features = ["std"] }
+libc = "0.2"
