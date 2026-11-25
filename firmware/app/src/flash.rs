@@ -19,10 +19,11 @@
 //! executor is blocked for the duration of one ROM call (sector erase typ. 45 ms, page program
 //! < 1 ms), which pauses USB report *sending* but not key scanning.
 //!
-//! **Staging.** [`NorStorage`] keeps a RAM copy of every slot it has read. `store` only updates
-//! that copy and marks it dirty (cheap, can run under the keyboard lock); [`NorStorage::commit`]
-//! writes dirty slots later from the low-priority task (debounced, and forced before reset /
-//! bootloader).
+//! **Staging.** [`NorStorage`] reads straight from the memory-mapped NOR. `store` stages a
+//! changed bank-1 or profile image in RAM and marks it dirty (cheap, can run under the keyboard
+//! lock); [`NorStorage::commit`] writes it later from the low-priority task (debounced, and
+//! forced before reset / bootloader). XIP is only read from that same thread context, never
+//! while a ROM erase/program runs.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -46,8 +47,6 @@ const PAGE: u32 = 256;
 pub const BANK1_ADDR: u32 = 0x8007_0000;
 pub const PROFILE_ADDR: u32 = 0x8008_0000;
 pub const PROFILE_STRIDE: u32 = 0x2000;
-const BANK1_WORDS: usize = SECTOR as usize / 4;
-const PROFILE_WORDS: usize = PROFILE_STRIDE as usize / 4;
 const PROFILES: usize = zent_core::layout::PROFILE_COUNT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,10 +219,12 @@ pub fn read_uid() -> [u8; 16] {
 
 // ------------------------------------------------------------------ Storage
 
-#[repr(C, align(4))]
-struct Bank1([u32; BANK1_WORDS]);
-#[repr(C, align(4))]
-struct ProfileSlot([u32; PROFILE_WORDS]);
+/// Bytes of a slot the firmware owns (= stock shadow sizes); the rest of the slot's sectors is
+/// erased on a write, like stock.
+const BANK1_LEN: usize = zent_core::config::BANK1_SIZE;
+const PROFILE_LEN: usize = zent_core::config::BANK2_SIZE;
+const _: () = assert!(BANK1_LEN % 4 == 0 && PROFILE_LEN % 4 == 0);
+const _: () = assert!(BANK1_LEN <= SECTOR as usize && PROFILE_LEN <= PROFILE_STRIDE as usize);
 
 fn bytes(w: &[u32]) -> &[u8] {
     // SAFETY: u32 → u8 view of the same memory, alignment only decreases.
@@ -234,21 +235,41 @@ fn bytes_mut(w: &mut [u32]) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(w.as_mut_ptr() as *mut u8, w.len() * 4) }
 }
 
+/// Byte `i` of the NOR through the XIP window. Only from the storage/task context, never
+/// while a ROM erase/program is in flight (all flash ops run synchronously in thread mode).
+fn xip_byte(addr: u32) -> u8 {
+    unsafe { core::ptr::read_volatile(addr as usize as *const u8) }
+}
+
 /// Decide whether a stored blob counts as "nothing stored". Stock 0.0.18 writes real banks
 /// (non-uniform contents: calibration values, keymaps). An erased slot reads all 0xFF; an
 /// all-zero slot is equally meaningless. Anything else is accepted as-is so the owner's
 /// stock-written config is used unchanged.
-fn is_empty(b: &[u8]) -> bool {
-    b.iter().all(|&x| x == 0xFF) || b.iter().all(|&x| x == 0x00)
+fn is_empty(mut b: impl Iterator<Item = u8> + Clone) -> bool {
+    b.clone().all(|x| x == 0xFF) || b.all(|x| x == 0x00)
 }
 
+/// Where the current content of a slot lives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Src {
+    Flash,
+    Staged,
+    Blank,
+}
+
+/// Staged config writes. Reads come straight from the memory-mapped NOR (XIP); a `store` that
+/// changes something is staged in RAM (cheap, runs under the keyboard lock) and written by
+/// [`NorStorage::commit`] from the low-priority task (debounced, forced before reset /
+/// bootloader). RAM: one bank-1 image and one profile image (stock sizes) — profiles are only
+/// ever stored for the active one; an all-0xFF store (wipe) needs no buffer at all.
 pub struct NorStorage {
-    bank1: Bank1,
-    profiles: [ProfileSlot; PROFILES],
-    /// bit 0 = bank 1, bit 1+k = profile k: RAM copy valid.
-    loaded: u8,
-    /// Same bits: RAM copy differs from flash.
-    dirty: u8,
+    bank1: [u32; BANK1_LEN / 4],
+    bank1_dirty: bool,
+    profile: [u32; PROFILE_LEN / 4],
+    /// Profile whose image is staged in `profile` (dirty).
+    profile_slot: Option<u8>,
+    /// Profiles to erase (bit k).
+    blank: u8,
     /// Last `store` that changed something (ms), for debouncing.
     last_change_ms: u64,
     pub commits: u32,
@@ -258,105 +279,173 @@ pub struct NorStorage {
 impl NorStorage {
     pub const fn new() -> Self {
         Self {
-            bank1: Bank1([0; BANK1_WORDS]),
-            profiles: [const { ProfileSlot([0; PROFILE_WORDS]) }; PROFILES],
-            loaded: 0,
-            dirty: 0,
+            bank1: [0; BANK1_LEN / 4],
+            bank1_dirty: false,
+            profile: [0; PROFILE_LEN / 4],
+            profile_slot: None,
+            blank: 0,
             last_change_ms: 0,
             commits: 0,
             errors: 0,
         }
     }
 
-    fn slot(&mut self, slot: Slot) -> Option<(u8, u32, &mut [u32])> {
+    fn addr(slot: Slot) -> Option<(u32, usize)> {
         match slot {
-            Slot::Global => Some((1, BANK1_ADDR, &mut self.bank1.0[..])),
-            Slot::Profile(k) if (k as usize) < PROFILES => Some((
-                1 << (1 + k),
-                PROFILE_ADDR + k as u32 * PROFILE_STRIDE,
-                &mut self.profiles[k as usize].0[..],
-            )),
+            Slot::Global => Some((BANK1_ADDR, BANK1_LEN)),
+            Slot::Profile(k) if (k as usize) < PROFILES => Some((PROFILE_ADDR + k as u32 * PROFILE_STRIDE, PROFILE_LEN)),
             Slot::Profile(_) => None,
         }
     }
 
-    fn ensure_loaded(&mut self, slot: Slot) -> Option<(u8, &mut [u32])> {
-        let loaded = self.loaded;
-        let (bit, addr, words) = self.slot(slot)?;
-        if loaded & bit == 0 {
-            nor_read(addr, words);
-            self.loaded |= bit;
+    fn src(&self, slot: Slot) -> Src {
+        match slot {
+            Slot::Global if self.bank1_dirty => Src::Staged,
+            Slot::Profile(k) if self.profile_slot == Some(k) => Src::Staged,
+            Slot::Profile(k) if self.blank & (1 << k) != 0 => Src::Blank,
+            _ => Src::Flash,
         }
-        let (bit, _, words) = self.slot(slot)?;
-        Some((bit, words))
+    }
+
+    /// Current content byte `i` of `slot` (staged, pending erase or flash).
+    fn byte(&self, slot: Slot, i: usize) -> u8 {
+        let (addr, _) = Self::addr(slot).unwrap_or((BANK1_ADDR, 0));
+        match self.src(slot) {
+            Src::Staged if slot == Slot::Global => bytes(&self.bank1)[i],
+            Src::Staged => bytes(&self.profile)[i],
+            Src::Blank => 0xFF,
+            Src::Flash => xip_byte(addr + i as u32),
+        }
     }
 
     pub fn dirty(&self) -> bool {
-        self.dirty != 0
+        self.bank1_dirty || self.profile_slot.is_some() || self.blank != 0
     }
 
     /// Write every dirty slot if `force`, or if the last change is older than `debounce_ms`.
     /// Returns the number of slots written. Call from thread mode only, never under the
     /// keyboard lock.
     pub fn commit(&mut self, now_ms: u64, debounce_ms: u64, force: bool) -> usize {
-        if self.dirty == 0 || (!force && now_ms.saturating_sub(self.last_change_ms) < debounce_ms) {
+        if !self.dirty() || (!force && now_ms.saturating_sub(self.last_change_ms) < debounce_ms) {
             return 0;
         }
         let mut n = 0;
-        for slot in [Slot::Global, Slot::Profile(0), Slot::Profile(1), Slot::Profile(2), Slot::Profile(3)] {
-            let dirty = self.dirty;
-            let Some((bit, addr, words)) = self.slot(slot) else { continue };
-            if dirty & bit == 0 {
-                continue;
-            }
-            let mut res = write_region(addr, words);
-            if res.is_err() {
-                res = write_region(addr, words); // one retry
-            }
-            match res {
-                Ok(()) => {
-                    self.dirty &= !bit;
-                    self.commits += 1;
-                    n += 1;
-                    log!("flash: saved {:?} @0x{:08x}", slot, addr);
-                }
-                Err(e) => {
-                    self.errors += 1;
-                    // Keep the RAM copy authoritative; do not retry forever.
-                    self.dirty &= !bit;
-                    log!("flash: save {:?} @0x{:08x} FAILED {:?}", slot, addr, e);
-                }
+        if self.bank1_dirty {
+            self.bank1_dirty = false;
+            n += self.finish(Slot::Global, BANK1_ADDR, |s| write_region(BANK1_ADDR, &s.bank1));
+        }
+        if let Some(k) = self.profile_slot.take() {
+            let addr = PROFILE_ADDR + k as u32 * PROFILE_STRIDE;
+            n += self.finish(Slot::Profile(k), addr, |s| write_region(addr, &s.profile));
+        }
+        for k in 0..PROFILES as u8 {
+            if self.blank & (1 << k) != 0 {
+                self.blank &= !(1 << k);
+                let addr = PROFILE_ADDR + k as u32 * PROFILE_STRIDE;
+                n += self.finish(Slot::Profile(k), addr, |_| erase_region(addr, PROFILE_STRIDE));
             }
         }
         n
     }
+
+    fn finish(&mut self, slot: Slot, addr: u32, write: impl Fn(&Self) -> Result<(), FlashError>) -> usize {
+        let mut res = write(self);
+        if res.is_err() {
+            res = write(self); // one retry
+        }
+        match res {
+            Ok(()) => {
+                self.commits += 1;
+                log!("flash: saved {:?} @0x{:08x}", slot, addr);
+                1
+            }
+            Err(e) => {
+                // The keyboard's RAM copy stays authoritative; do not retry forever.
+                self.errors += 1;
+                log!("flash: save {:?} @0x{:08x} FAILED {:?}", slot, addr, e);
+                0
+            }
+        }
+    }
+}
+
+/// Erase `len` bytes (whole sectors) and verify they read 0xFF.
+fn erase_region(addr: u32, len: u32) -> Result<(), FlashError> {
+    for s in (0..len).step_by(SECTOR as usize) {
+        crate::system::watchdog_feed();
+        nor_modify(addr + s, SECTOR, Op::EraseSector)?;
+    }
+    dcache_drop_xip();
+    if (0..len).any(|i| xip_byte(addr + i) != 0xFF) {
+        return Err(FlashError::Verify);
+    }
+    Ok(())
 }
 
 impl Storage for NorStorage {
     fn load(&mut self, slot: Slot, buf: &mut [u8]) -> Result<(), StorageError> {
-        let (_, words) = self.ensure_loaded(slot).ok_or(StorageError::Io)?;
-        let src = bytes(words);
-        let n = buf.len().min(src.len());
-        if is_empty(&src[..n]) {
+        let (_, len) = Self::addr(slot).ok_or(StorageError::Io)?;
+        let n = buf.len().min(len);
+        dcache_drop_xip();
+        if is_empty((0..n).map(|i| self.byte(slot, i))) {
             return Err(StorageError::Empty);
         }
-        buf[..n].copy_from_slice(&src[..n]);
+        for (i, b) in buf[..n].iter_mut().enumerate() {
+            *b = self.byte(slot, i);
+        }
         Ok(())
     }
 
     fn store(&mut self, slot: Slot, data: &[u8]) -> Result<(), StorageError> {
-        // Load first so a partial store (bank 1: core keeps 0x400 of the 0x790 stock bytes)
-        // preserves the rest of the sector.
-        let now = embassy_time::Instant::now().as_millis();
-        let (bit, words) = self.ensure_loaded(slot).ok_or(StorageError::Io)?;
-        let dst = bytes_mut(words);
-        let n = data.len().min(dst.len());
-        if dst[..n] == data[..n] {
+        let (_, len) = Self::addr(slot).ok_or(StorageError::Io)?;
+        let n = data.len().min(len);
+        dcache_drop_xip();
+        if data[..n].iter().enumerate().all(|(i, &b)| self.byte(slot, i) == b) {
             return Ok(()); // unchanged: no flash wear
         }
-        dst[..n].copy_from_slice(&data[..n]);
-        self.dirty |= bit;
-        self.last_change_ms = now;
+        self.last_change_ms = embassy_time::Instant::now().as_millis();
+        match slot {
+            Slot::Global => {
+                if !self.bank1_dirty {
+                    // partial store: keep the rest of the current content
+                    for i in n..len {
+                        bytes_mut(&mut self.bank1)[i] = xip_byte(BANK1_ADDR + i as u32);
+                    }
+                }
+                bytes_mut(&mut self.bank1)[..n].copy_from_slice(&data[..n]);
+                self.bank1_dirty = true;
+            }
+            Slot::Profile(k) => {
+                if n == len && data.iter().all(|&b| b == 0xFF) {
+                    // erase only (wipe): no image needed
+                    if self.profile_slot == Some(k) {
+                        self.profile_slot = None;
+                    }
+                    self.blank |= 1 << k;
+                    return Ok(());
+                }
+                if let Some(j) = self.profile_slot.filter(|&j| j != k) {
+                    // Only one profile image is staged. Two different profiles within one
+                    // debounce window (save, then a profile switch that repairs the new one):
+                    // flush the older one now, under the keyboard lock (stock always saves
+                    // with interrupts masked, so a ~100 ms pause is no regression).
+                    log!("flash: flushing profile {} early", j);
+                    self.profile_slot = None;
+                    let addr = PROFILE_ADDR + j as u32 * PROFILE_STRIDE;
+                    self.finish(Slot::Profile(j), addr, |s| write_region(addr, &s.profile));
+                }
+                if self.profile_slot != Some(k) {
+                    let from_blank = self.blank & (1 << k) != 0;
+                    for i in n..len {
+                        bytes_mut(&mut self.profile)[i] =
+                            if from_blank { 0xFF } else { xip_byte(PROFILE_ADDR + k as u32 * PROFILE_STRIDE + i as u32) };
+                    }
+                }
+                bytes_mut(&mut self.profile)[..n].copy_from_slice(&data[..n]);
+                self.profile_slot = Some(k);
+                self.blank &= !(1 << k);
+            }
+        }
         Ok(())
     }
 }
