@@ -1,63 +1,93 @@
 /**
- * Application state and shell. The app talks to the keyboard only through the
- * KeyboardProtocol interface; which protocol / transport is behind it is decided in connect*().
+ * The shell: top bar (profiles, save state), navigation rail, the current page, toasts.
+ * State and device operations live in Store; this file renders and asks the questions
+ * (confirmations) that belong in front of them. Design: docs/ux.md.
  */
-import { CalibrationFlow } from "../protocol/calibration";
-import {
-  cloneConfig, type Calibration, type CustomSwitch, type DeviceInfo, type KeyboardProtocol, type LiveSample, type ProfileConfig,
-} from "../protocol/keyboard";
-import type { Transport } from "../protocol/transport";
-import { ZentStockProtocol } from "../protocol/zent/protocol";
+import type { Calibration, CustomSwitch, DeviceInfo, ProfileConfig } from "../protocol/keyboard";
 import { MockDevice } from "../transport/mock";
 import { WebHidTransport, webHidSupported } from "../transport/webhid";
-import { clear, confirmDialog, h } from "./dom";
-import { renderKeyboard, type KeyVisual, type KeyboardView } from "./keyboard-view";
-import { TABS, type TabDef, type TabId } from "./tabs";
+import { choiceDialog, clear, confirmDialog, h, popupMenu, promptDialog, type Child } from "./dom";
+import { renderKeyboard, type KeyboardView, type KeyboardViewOptions } from "./keyboard-view";
+import { actuationPage } from "./pages/actuation";
+import { advancedPage } from "./pages/advanced";
+import { devicePage, exportProfiles } from "./pages/device";
+import { homePage } from "./pages/home";
+import { keymapPage } from "./pages/keymap";
+import { lightingPage } from "./pages/lighting";
+import { sensorsPage } from "./pages/sensors";
+import { socdPage } from "./pages/socd";
+import { Store, type ToastKind } from "./store";
 
-export interface Toast { id: number; kind: "info" | "ok" | "error"; text: string }
+export type PageId = "home" | "actuation" | "lighting" | "socd" | "keymap" | "advanced" | "sensors" | "device";
 
-/** Chooses the protocol for a transport. A second protocol (our own firmware) plugs in here. */
-export function createProtocol(transport: Transport): KeyboardProtocol {
-  return new ZentStockProtocol(transport);
+export interface Page {
+  id: PageId;
+  title: string;
+  /** rail group: 0 everyday, 1 less often, 2 the keyboard itself */
+  group: 0 | 1 | 2;
+  render(app: App): HTMLElement;
 }
 
+const PAGES: readonly Page[] = [homePage, actuationPage, lightingPage, socdPage, keymapPage, advancedPage, sensorsPage, devicePage];
+const GROUP_TITLES = [null, "Less often", "Keyboard"] as const;
+const THEMES = ["auto", "light", "dark"] as const;
+
+interface Toast { id: number; kind: ToastKind; text: string }
+
 export class App {
-  kb: KeyboardProtocol | null = null;
-  info: DeviceInfo | null = null;
-  backend = "";
-  config: ProfileConfig | null = null;
-  calibration: Calibration | null = null;
-  /** board-global custom switch records 0..3 */
-  customSwitches: CustomSwitch[] | null = null;
-  profileNames: string[] = [];
-  activeProfile = 0;
-  /** RAM differs from flash (edits not saved yet) */
-  dirty = false;
-  busy: string | null = null;
-  tab: TabId = "keymap";
+  readonly store = new Store();
+  page: PageId = "home";
+  /** keys selected on the keyboard drawing; cleared when the page changes */
   selection = new Set<number>();
-  /** per-tab UI state that must survive re-renders */
+  /** per-page UI state that must survive re-renders */
   ui: Record<string, any> = {};
-  live: LiveSample | null = null;
-  calibrationFlow: CalibrationFlow | null = null;
   keyboardView: KeyboardView | null = null;
 
   private toasts: Toast[] = [];
   private toastSeq = 0;
-  private queue: Promise<unknown> = Promise.resolve();
-  private stopLive: (() => void) | null = null;
-  private liveListeners = new Set<(s: LiveSample) => void>();
-  private unsub: (() => void)[] = [];
+  private elProfiles!: HTMLElement;
+  private elSave!: HTMLElement;
+  private elRail!: HTMLElement;
+  private elMain!: HTMLElement;
+  private elToasts!: HTMLElement;
 
   constructor(private readonly root: HTMLElement) {}
+
+  // ------------------------------------------------------------ shortcuts for the pages
+
+  get config(): ProfileConfig { return this.store.config!; }
+  get calibration(): Calibration { return this.store.calibration!; }
+  get customSwitches(): CustomSwitch[] | null { return this.store.customSwitches; }
+  get info(): DeviceInfo { return this.store.info!; }
+  get busy(): boolean { return !!this.store.busy; }
+
+  edit(label: string, mutate: (draft: ProfileConfig) => void): Promise<unknown> {
+    return this.store.edit(label, mutate);
+  }
+
+  toast(kind: ToastKind, text: string): void {
+    const t = { id: ++this.toastSeq, kind, text };
+    this.toasts.push(t);
+    if (this.toasts.length > 4) this.toasts.shift();
+    this.renderToasts();
+    setTimeout(() => {
+      this.toasts = this.toasts.filter((x) => x !== t);
+      this.renderToasts();
+    }, kind === "error" ? 9000 : 4000);
+  }
+
+  /** The keyboard drawing of a page, with an optional line of guidance under it. */
+  stage(options: Omit<KeyboardViewOptions, "selected" | "onSelect"> & { hint?: Child; onSelect?: () => void }): HTMLElement {
+    this.keyboardView = renderKeyboard({ ...options, selected: this.selection, onSelect: options.onSelect ?? (() => this.render()) });
+    return h("section", { class: "stage" }, this.keyboardView.element, options.hint ? h("p", { class: "stage-hint" }, options.hint) : null);
+  }
 
   // ------------------------------------------------------------ connection
 
   async connectWebHid(): Promise<void> {
     try {
       const transport = await WebHidTransport.request();
-      if (!transport) return;
-      await this.attach(transport);
+      if (transport) await this.store.attach(transport);
     } catch (e) {
       this.toast("error", `Could not connect: ${(e as Error).message}`);
     }
@@ -67,7 +97,7 @@ export class App {
     try {
       const [transport] = await WebHidTransport.granted();
       if (!transport) return false;
-      await this.attach(transport);
+      await this.store.attach(transport);
       return true;
     } catch {
       return false;
@@ -75,293 +105,228 @@ export class App {
   }
 
   async connectMock(version: [number, number, number] = [0, 0, 18]): Promise<void> {
-    await this.attach(new MockDevice({ demo: true, version }));
-  }
-
-  private async attach(transport: Transport): Promise<void> {
-    await this.run("Connecting…", async () => {
-      const kb = createProtocol(transport);
-      this.info = await kb.connect();
-      this.kb = kb;
-      this.backend = transport.info.backend;
-      this.unsub.push(kb.on("disconnect", () => this.handleDisconnect()));
-      this.unsub.push(kb.on("profile", (p) => this.handleProfileNotice(p)));
-      await this.loadAll();
-    });
-    if (!this.kb) this.render();
+    await this.store.attach(new MockDevice({ demo: true, version }));
   }
 
   async disconnect(): Promise<void> {
-    await this.leaveLiveModes();
-    const kb = this.kb;
-    this.reset();
-    await kb?.disconnect();
-    this.render();
+    this.stopPageStreams();
+    await this.store.disconnect();
   }
 
-  private reset(): void {
-    for (const u of this.unsub.splice(0)) u();
-    this.kb = null;
-    this.info = null;
-    this.config = null;
-    this.calibration = null;
-    this.customSwitches = null;
-    this.dirty = false;
+  // ------------------------------------------------------------ navigation
+
+  async go(page: PageId): Promise<void> {
+    if (!PAGES.some((p) => p.id === page)) page = "home";
+    if (location.hash !== `#/${page}`) history.replaceState(null, "", `#/${page}`);
+    if (page === this.page) return;
+    this.stopPageStreams();
+    await this.store.leaveLiveModes();
+    this.page = page;
     this.selection.clear();
-    this.stopLive = null;
-    this.calibrationFlow = null;
-    this.live = null;
-  }
-
-  private handleDisconnect(): void {
-    this.reset();
-    this.toast("error", "The keyboard disconnected.");
     this.render();
+    window.scrollTo(0, 0);
   }
 
-  private handleProfileNotice(index: number): void {
-    if (index === this.activeProfile || this.busy) return;
-    this.toast("info", `The keyboard switched to profile ${index + 1}.`);
-    void this.run("Loading profile…", async () => {
-      this.activeProfile = index;
-      this.dirty = false;
-      this.config = await this.kb!.readConfig();
-    });
-  }
-
-  private async loadAll(): Promise<void> {
-    const kb = this.kb!;
-    this.activeProfile = await kb.getActiveProfile();
-    this.profileNames = await kb.readProfileNames();
-    this.config = await kb.readConfig();
-    this.calibration = await kb.readCalibration();
-    this.customSwitches = await kb.readCustomSwitches();
-    this.dirty = false;
-  }
-
-  // ------------------------------------------------------------ operations
-
-  /** Serialise device operations and show a busy state while they run. */
-  run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
-    const job = this.queue.then(async () => {
-      this.busy = label;
-      this.renderChrome();
-      try {
-        return await fn();
-      } catch (e) {
-        console.error(e);
-        this.toast("error", `${label.replace(/…$/, "")} failed: ${(e as Error).message}`);
-        return undefined;
-      } finally {
-        this.busy = null;
-        this.render();
-      }
-    });
-    this.queue = job.catch(() => undefined);
-    return job;
-  }
-
-  /** Change the active profile's config: applied to the keyboard's RAM immediately, like the vendor driver. */
-  edit(label: string, mutate: (draft: ProfileConfig) => void): Promise<unknown> {
-    if (!this.kb || !this.config) return Promise.resolve();
-    const next = cloneConfig(this.config);
-    mutate(next);
-    return this.run(label, async () => {
-      try {
-        const written = await this.kb!.writeConfig(next);
-        this.config = next;
-        if (written > 0) this.dirty = true;
-      } catch (e) {
-        // the device may hold a half-applied change: re-read the truth
-        this.config = await this.kb!.readConfig().catch(() => this.config);
-        throw e;
-      }
-    });
-  }
-
-  editCalibration(label: string, mutate: (draft: Calibration) => void): Promise<unknown> {
-    if (!this.kb || !this.calibration) return Promise.resolve();
-    const next = cloneConfig(this.calibration);
-    mutate(next);
-    return this.run(label, async () => {
-      const written = await this.kb!.writeCalibration(next);
-      this.calibration = next;
-      if (written > 0) this.dirty = true;
-    });
-  }
-
-  /** Custom switch records live in bank 1: the firmware saves them to flash on every write. */
-  editCustomSwitches(label: string, mutate: (draft: CustomSwitch[]) => void): Promise<unknown> {
-    if (!this.kb || !this.customSwitches) return Promise.resolve();
-    const next = cloneConfig(this.customSwitches);
-    mutate(next);
-    return this.run(label, async () => {
-      try {
-        await this.kb!.writeCustomSwitches(next);
-        this.customSwitches = next;
-      } catch (e) {
-        this.customSwitches = await this.kb!.readCustomSwitches().catch(() => this.customSwitches);
-        throw e;
-      }
-    });
-  }
-
-  save(): Promise<unknown> {
-    return this.run("Saving to flash…", async () => {
-      await this.kb!.save();
-      this.dirty = false;
-      this.toast("ok", "Saved to flash.");
-    });
-  }
-
-  async switchProfile(index: number): Promise<void> {
-    if (index === this.activeProfile || !this.kb) return;
-    if (this.dirty) {
-      const ok = await confirmDialog({
-        title: "Unsaved changes",
-        body: "Switching profiles discards changes that were not saved to flash. Switch anyway?",
-        confirmLabel: "Discard and switch", danger: true,
-      });
-      if (!ok) return;
-    }
-    await this.leaveLiveModes();
-    await this.run("Switching profile…", async () => {
-      await this.kb!.setActiveProfile(index);
-      this.activeProfile = index;
-      this.config = await this.kb!.readConfig();
-      this.dirty = false;
-    });
-  }
-
-  reload(): Promise<unknown> {
-    return this.run("Reading configuration…", () => this.loadAll());
-  }
-
-  // ------------------------------------------------------------ live stream
-
-  /** Subscribe to live samples; the stream runs while there is at least one subscriber. */
-  subscribeLive(listener: (s: LiveSample) => void): () => void {
-    this.liveListeners.add(listener);
-    if (!this.stopLive && this.kb) {
-      this.stopLive = this.kb.startStream((s) => {
-        this.live = s;
-        for (const l of [...this.liveListeners]) l(s);
-      });
-    }
-    return () => {
-      this.liveListeners.delete(listener);
-      if (this.liveListeners.size === 0) {
-        this.stopLive?.();
-        this.stopLive = null;
-      }
-    };
-  }
-
-  /** Stop streaming / calibration when leaving a tab or the device. */
-  async leaveLiveModes(): Promise<void> {
+  private stopPageStreams(): void {
     this.ui.liveStop?.();
     this.ui.liveStop = null;
-    if (this.calibrationFlow?.running) await this.calibrationFlow.cancel().catch(() => undefined);
-    this.calibrationFlow = null;
   }
 
-  async setTab(tab: TabId): Promise<void> {
-    if (tab === this.tab) return;
-    await this.leaveLiveModes();
-    this.tab = tab;
-    this.selection.clear();
-    this.render();
+  // ------------------------------------------------------------ confirmed actions
+
+  async switchProfile(index: number): Promise<void> {
+    const s = this.store;
+    if (index === s.activeProfile || !s.kb) return;
+    if (s.dirty) {
+      const choice = await choiceDialog({
+        title: "Unsaved changes",
+        body: `Profile ${s.activeProfile + 1} has unsaved changes (${s.unsavedAreas.join(", ")}). The keyboard drops them when it switches profile.`,
+        cancelLabel: "Stay",
+        choices: [
+          { id: "discard", label: "Discard and switch", kind: "danger" },
+          { id: "save", label: "Save and switch", kind: "primary" },
+        ],
+      });
+      if (!choice) return;
+      if (choice === "save") await s.save();
+    }
+    this.stopPageStreams();
+    await s.switchProfile(index);
   }
 
-  // ------------------------------------------------------------ toasts
+  async renameProfile(index: number): Promise<void> {
+    const s = this.store;
+    const name = await promptDialog({
+      title: `Rename profile ${index + 1}`, label: "Name (the vendor driver shows at most 10 characters)", value: s.profileNames[index] ?? "", maxLength: 20, confirmLabel: "Rename",
+    });
+    if (name === null) return;
+    if (!name.trim()) return this.toast("error", "The profile name must not be empty.");
+    await s.renameProfile(index, name.trim());
+  }
 
-  toast(kind: Toast["kind"], text: string): void {
-    const t = { id: ++this.toastSeq, kind, text };
-    this.toasts.push(t);
-    this.renderToasts();
-    setTimeout(() => {
-      this.toasts = this.toasts.filter((x) => x !== t);
-      this.renderToasts();
-    }, kind === "error" ? 9000 : 4000);
+  async resetProfile(): Promise<void> {
+    const s = this.store;
+    const n = s.activeProfile + 1;
+    const ok = await confirmDialog({
+      title: `Reset profile ${n} to factory defaults`,
+      body: h("div", null,
+        h("p", null, `Everything in profile ${n} (“${s.profileNames[s.activeProfile] ?? ""}”) goes back to factory values: keymap, actuation, SOCD, advanced keys, lighting, settings. The keyboard stores the reset at once.`),
+        h("p", null, "Calibration, switch types, profile names and the other profiles are not touched. While this page stays open, Undo and then Save brings the old profile back."),
+      ),
+      confirmLabel: "Reset profile", danger: true,
+    });
+    if (ok) await s.resetProfile();
   }
 
   // ------------------------------------------------------------ rendering
 
-  private elHeader!: HTMLElement;
-  private elMain!: HTMLElement;
-  private elToasts!: HTMLElement;
-
   mount(): void {
-    this.elHeader = h("header", { class: "topbar" });
-    this.elMain = h("main", { class: "main" });
+    this.applyTheme();
+    this.elProfiles = h("div", { class: "profiles", role: "group", "aria-label": "Profiles" });
+    this.elSave = h("div", { class: "savebar" });
+    this.elRail = h("nav", { class: "rail", "aria-label": "Sections" });
+    this.elMain = h("main", { class: "content" });
     this.elToasts = h("div", { class: "toasts", role: "status", "aria-live": "polite" });
     clear(this.root);
-    this.root.append(this.elHeader, this.elMain, this.elToasts,
-      h("footer", { class: "footer" },
-        "WebHID works only in Chromium-based browsers (Chrome, Edge, Brave, Opera). Firefox and Safari cannot talk to the keyboard. ",
-        "Changes are applied to the keyboard's RAM at once and survive a replug only after “Save to flash”.",
-      ),
+    this.root.append(
+      h("header", { class: "topbar" },
+        h("a", { class: "brand", href: "#/home", "aria-label": "ZENT75-HE, home" }, h("span", { class: "brand-mark" }), "ZENT75", h("span", { class: "brand-sub" }, "HE")),
+        this.elProfiles, this.elSave),
+      h("div", { class: "body" }, this.elRail, this.elMain),
+      this.elToasts,
     );
+    this.store.onChange(() => this.render());
+    this.store.onBusy(() => this.renderSaveBar());
+    this.store.onToast((kind, text) => this.toast(kind, text));
+
+    const fromHash = () => void this.go((location.hash.replace(/^#\/?/, "") || "home") as PageId);
+    window.addEventListener("hashchange", fromHash);
+    const initial = location.hash.replace(/^#\/?/, "") as PageId;
+    if (PAGES.some((p) => p.id === initial)) this.page = initial;
+
+    window.addEventListener("keydown", (e) => this.onKey(e));
+    window.addEventListener("beforeunload", (e) => {
+      if (this.store.dirty) e.preventDefault();
+    });
     this.render();
   }
 
+  private onKey(e: KeyboardEvent): void {
+    if (!this.store.connected || document.querySelector("dialog[open]")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const typing = e.target instanceof HTMLElement && e.target.matches("input:not([type=range]):not([type=checkbox]), textarea, select");
+    if (mod && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      if (this.store.dirty) void this.store.save();
+    } else if (mod && !e.shiftKey && e.key.toLowerCase() === "z" && !typing) {
+      e.preventDefault();
+      void this.store.undo();
+    } else if (e.key === "Escape" && this.selection.size && !typing) {
+      this.selection.clear();
+      this.render();
+    }
+  }
+
   render(): void {
-    this.renderChrome();
-    clear(this.elMain);
-    if (!this.kb || !this.config || !this.info) {
-      this.elMain.appendChild(this.renderConnect());
+    const connected = this.store.connected;
+    this.root.classList.toggle("is-connected", connected);
+    this.renderProfiles();
+    this.renderSaveBar();
+    this.renderRail();
+    const focus = (document.activeElement as HTMLElement | null)?.dataset?.fid;
+    this.keyboardView = null;
+    const content = connected ? (PAGES.find((p) => p.id === this.page) ?? PAGES[0]).render(this) : this.renderConnect();
+    this.elMain.replaceChildren(content);
+    if (focus) this.elMain.querySelector<HTMLElement>(`[data-fid="${focus}"]`)?.focus({ preventScroll: true });
+  }
+
+  private renderProfiles(): void {
+    const s = this.store;
+    clear(this.elProfiles);
+    if (!s.connected) return;
+    // as many profiles as the keyboard reports
+    s.profileNames.slice(0, s.profileCount).forEach((name, i) => {
+      const active = i === s.activeProfile;
+      const pill = h("button", {
+        type: "button", class: active ? "pill active" : "pill", "aria-pressed": String(active),
+        title: active ? `Profile ${i + 1} is active. Click for rename, reset, export.` : `Switch to profile ${i + 1}`,
+        onclick: () => {
+          if (!active) return void this.switchProfile(i);
+          popupMenu(pill, [
+            { label: "Rename…", onSelect: () => void this.renameProfile(i) },
+            { label: "Export this profile", onSelect: () => exportProfiles(this, false, false) },
+            { label: "Reset to factory defaults…", danger: true, onSelect: () => void this.resetProfile() },
+          ]);
+        },
+      }, h("span", { class: "pill-n" }, String(i + 1)), h("span", { class: "pill-name" }, name || `Profile ${i + 1}`), active ? h("span", { class: "pill-caret", "aria-hidden": "true" }, "▾") : null);
+      this.elProfiles.appendChild(pill);
+    });
+  }
+
+  /** Save state and its three actions. Repainted alone while an operation runs. */
+  private renderSaveBar(): void {
+    const s = this.store;
+    clear(this.elSave);
+    if (!s.connected) {
+      if (s.busy) this.elSave.appendChild(h("span", { class: "state busy" }, `${s.busy}…`));
       return;
     }
-    const tab: TabDef = TABS.find((t) => t.id === this.tab) ?? TABS[0];
-    const visual = (i: number): KeyVisual => tab.visual(this, i);
-    this.keyboardView = renderKeyboard({
-      visual,
-      selected: this.selection,
-      onClick: tab.onKeyClick ? (i, e) => tab.onKeyClick!(this, i, e) : undefined,
-      onContextMenu: tab.onKeyContext ? (i, e) => tab.onKeyContext!(this, i, e) : undefined,
-    });
-    this.elMain.append(
-      h("nav", { class: "tabs", role: "tablist" },
-        TABS.map((t) => h("button", {
-          class: t.id === this.tab ? "tab active" : "tab", role: "tab", "aria-selected": String(t.id === this.tab),
-          onclick: () => void this.setTab(t.id),
-        }, t.title)),
-      ),
-      h("section", { class: "board" },
-        tab.hint ? h("p", { class: "hint" }, tab.hint) : null,
-        this.keyboardView.element,
-      ),
-      h("section", { class: "panel" }, tab.render(this)),
+    const areas = s.unsavedAreas;
+    const state = s.busy
+      ? h("span", { class: "state busy" }, `${s.busy}…`)
+      : s.dirty
+        ? h("span", { class: "state unsaved", title: "These changes are active on the keyboard now, but a replug drops them until you save." }, `Unsaved: ${areas.join(", ") || "changes"}`)
+        : h("span", { class: "state saved", title: "The keyboard's flash holds what you see." }, "Saved");
+    this.elSave.append(
+      state,
+      h("button", {
+        type: "button", class: "btn ghost", disabled: !s.canUndo || !!s.busy, dataset: { fid: "undo" },
+        title: s.canUndo ? `Undo: ${s.undoLabel} (Ctrl+Z)` : "Nothing to undo", onclick: () => void s.undo(),
+      }, "Undo"),
+      h("button", {
+        type: "button", class: "btn ghost", disabled: !s.dirty || !!s.busy, dataset: { fid: "discard" },
+        title: "Put back what was last saved. Undo brings the changes back.", onclick: () => void s.discard(),
+      }, "Discard"),
+      h("button", {
+        type: "button", class: s.dirty ? "btn primary" : "btn", disabled: !s.dirty || !!s.busy, dataset: { fid: "save" },
+        title: "Store the current settings in the keyboard so they survive a replug (Ctrl+S)", onclick: () => void s.save(),
+      }, "Save to keyboard"),
     );
   }
 
-  /** Header only (cheap; used while busy). */
-  renderChrome(): void {
-    clear(this.elHeader);
-    const connected = !!this.kb && !!this.info;
-    this.elHeader.append(
-      h("div", { class: "brand" }, h("span", { class: "brand-mark" }, "Z75"), h("span", null, "ZENT75-HE panel")),
-      connected
-        ? h("div", { class: "profiles", role: "group", "aria-label": "Profiles" },
-            this.profileNames.map((name, i) => h("button", {
-              class: i === this.activeProfile ? "pill active" : "pill", disabled: !!this.busy,
-              title: `Switch to profile ${i + 1}`, onclick: () => void this.switchProfile(i),
-            }, h("span", { class: "pill-n" }, String(i + 1)), name)),
-          )
-        : h("div", { class: "profiles" }),
-      h("div", { class: "status" },
-        this.busy ? h("span", { class: "busy" }, this.busy) : null,
-        connected ? h("span", { class: "chip" }, `fw ${this.info!.firmwareVersion}`, this.backend === "mock" ? " · mock" : "") : null,
-        connected
-          ? h("button", {
-              class: this.dirty ? "btn primary attention" : "btn", disabled: !!this.busy,
-              title: "Persist the keyboard's current RAM configuration to flash (BE 02)",
-              onclick: () => void this.save(),
-            }, this.dirty ? "Save to flash •" : "Save to flash")
-          : null,
-        connected ? h("button", { class: "btn ghost", onclick: () => void this.disconnect() }, "Disconnect") : null,
-      ),
-    );
+  private renderRail(): void {
+    clear(this.elRail);
+    if (!this.store.connected) return;
+    const s = this.store;
+    let group = 0;
+    for (const p of PAGES) {
+      if (p.group !== group) {
+        group = p.group;
+        this.elRail.appendChild(h("div", { class: "rail-group" }, GROUP_TITLES[group]));
+      }
+      this.elRail.appendChild(h("a", {
+        class: p.id === this.page ? "rail-item active" : "rail-item", href: `#/${p.id}`, "aria-current": p.id === this.page ? "page" : null,
+      }, p.title));
+    }
+    const theme = (localStorage.getItem("zent-theme") ?? "auto") as (typeof THEMES)[number];
+    this.elRail.appendChild(h("div", { class: "rail-foot" },
+      h("span", { class: "rail-device", title: s.info!.productName }, `Firmware ${s.info!.firmwareVersion}${s.backend === "mock" ? ", mock" : ""}`),
+      h("button", {
+        type: "button", class: "link", title: "Colour theme: follow the system, light, or dark",
+        onclick: () => {
+          localStorage.setItem("zent-theme", THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length]);
+          this.applyTheme();
+          this.renderRail();
+        },
+      }, `Theme: ${theme}`),
+      h("button", { type: "button", class: "link", onclick: () => void this.disconnect() }, "Disconnect"),
+    ));
+  }
+
+  private applyTheme(): void {
+    const theme = localStorage.getItem("zent-theme");
+    if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
   }
 
   private renderToasts(): void {
@@ -371,27 +336,29 @@ export class App {
 
   private renderConnect(): HTMLElement {
     const supported = webHidSupported();
+    const busy = this.busy;
     return h("section", { class: "connect" },
-      h("h1", null, "ZENT75-HE configurator"),
-      h("p", { class: "lede" },
-        "Keymap, actuation, rapid trigger, SOCD, DKS, lighting, profiles, calibration and live key travel for the HOVEY WORKS ZENT75-HE, straight from the browser over WebHID.",
-      ),
+      h("h1", null, "Set up your ZENT75-HE"),
+      h("p", { class: "lede" }, "Actuation, rapid trigger, lighting, SOCD, keymap and calibration, straight from the browser. Nothing to install."),
       supported
-        ? h("p", { class: "note" }, "WebHID works only in Chromium-based browsers (Chrome, Edge, Brave, Opera). You are on one of them.")
-        : h("div", { class: "warning", role: "alert" },
-            h("strong", null, "This browser has no WebHID."),
-            " navigator.hid is missing, so the page cannot reach the keyboard. Open it in a Chromium-based browser (Chrome, Edge, Brave, Opera) over https or localhost. ",
-            "You can still explore everything with the mock device.",
+        ? null
+        : h("div", { class: "notice warn", role: "alert" },
+            h("strong", null, "This browser cannot reach the keyboard. "),
+            "It has no WebHID. Open this page in Chrome, Edge, Brave or Opera, over https or localhost. You can still look around with the demo keyboard.",
           ),
       h("div", { class: "connect-actions" },
-        h("button", { class: "btn primary big", disabled: !supported || !!this.busy, onclick: () => void this.connectWebHid() }, "Connect keyboard"),
-        h("button", { class: "btn big", disabled: !!this.busy, onclick: () => void this.connectMock() }, "Mock device"),
-        h("button", { class: "btn ghost", disabled: !!this.busy, title: "Mock of the older firmware without key groups / DKS", onclick: () => void this.connectMock([0, 0, 9]) }, "Mock fw 0.0.9"),
+        h("button", { class: "btn primary big", disabled: !supported || busy, onclick: () => void this.connectWebHid() }, "Connect keyboard"),
+        h("button", { class: "btn big", disabled: busy, onclick: () => void this.connectMock() }, "Try the demo keyboard"),
       ),
-      h("ul", { class: "facts" },
-        h("li", null, "USB 36b0:357e, vendor raw-HID interface (usage page 0xFF60, usage 0x61)."),
-        h("li", null, "On Linux the hidraw node must be accessible to your user (udev rule)."),
-        h("li", null, "Close the vendor web driver first: only one page can hold the device."),
+      h("details", { class: "disclosure" },
+        h("summary", null, "It does not connect"),
+        h("ul", { class: "facts" },
+          h("li", null, "WebHID works only in Chromium-based browsers (Chrome, Edge, Brave, Opera); Firefox and Safari do not have it."),
+          h("li", null, "Close the vendor web driver first: both pages would read each other's replies."),
+          h("li", null, "On Linux your user needs access to the keyboard's hidraw node (a udev rule for USB vendor 36b0)."),
+          h("li", null, "The keyboard is USB 36b0:357e; the panel uses its vendor interface (usage page 0xFF60)."),
+          h("li", null, h("button", { class: "link", disabled: busy, onclick: () => void this.connectMock([0, 0, 9]) }, "Demo keyboard with firmware 0.0.9"), " (no key groups / DKS)."),
+        ),
       ),
     );
   }
