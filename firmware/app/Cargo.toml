@@ -68,6 +68,10 @@ strip = false
 lto = true
 opt-level = "z" # optimize for size
 debug = 2
+# Panic locations (`file!()`) and debug info as `<crate>-<version>/src/…` instead of absolute
+# paths: saves DLM, makes the image independent of where the repo and ~/.cargo live, and
+# keeps the builder's home directory out of it.
+trim-paths = "object"
 
 # The 8 kHz scan path (engine + key pipeline + lighting bookkeeping) runs in zent-core: size
 # optimisation made it ~2x slower than the 125 µs scan budget allows.

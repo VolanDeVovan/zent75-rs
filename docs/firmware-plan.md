@@ -53,8 +53,8 @@ All five are implemented; what has been seen working on the keyboard is in
 
 - CPU budget: a scan takes 73 µs of the 125 µs period on hardware (CPU ~68 %). Changes to the
   engine or key pipeline must be measured (`tools/profile.py`, the console statistics line).
-- DLM is nearly full (about 113 of 128 KB with the 16 KB stack; the linker script asserts the
-  stack still fits). Big tables go to AHB SRAM.
+- DLM is nearly full (about 111 KB of data + bss and the 16 KB stack in 128 KB; the linker
+  script asserts the stack still fits). Big tables go to AHB SRAM.
 - A config-layout change would break the stock firmware's banks: keep the stock layout as long as we
   want to switch back and forth.
 

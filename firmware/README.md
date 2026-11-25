@@ -25,6 +25,10 @@ cd core && cargo test --features std
 cd app && cargo clippy --release
 ```
 
+The release profile sets `trim-paths = "object"`: panic locations and debug info name
+`/cargo/deps/zent-core-0.1.0/src/…` instead of absolute paths, so the image (and its DLM use)
+does not depend on where the repo is checked out and does not carry the builder's home directory.
+
 Cargo features of `app`: `profiler` (default; the statistical profiler, GPTMR0 + 8 KB of AHB
 SRAM) and `key-log` (off; logs every active key object on each HID change, costs scan time).
 
