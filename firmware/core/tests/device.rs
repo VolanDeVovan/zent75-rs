@@ -27,13 +27,16 @@ fn write_read_save_switch() {
     // save, switch to profile 1 and back: edit survives
     kb.vendor_in(&host::simple(cmd::SAVE), &mut st, &mut out);
     kb.vendor_in(&host::with_arg(cmd::SWITCH_PROFILE, 1), &mut st, &mut out);
+    kb.service(&mut st);
     assert_eq!(kb.active_profile(), 1);
     assert_eq!(kb.vendor_poll(&mut out), Some(6));
     assert_eq!(&out[..6], &[0xBE, 0xC0, 6, 0, 1, 0xED]);
     kb.vendor_in(&host::with_arg(cmd::SWITCH_PROFILE, 0), &mut st, &mut out);
+    kb.service(&mut st);
     assert_eq!(kb.profile.key_map(46), 5);
-    // out-of-range read is dropped
-    assert_eq!(kb.vendor_in(&host::read(cmd::READ_RAM, 0x8004_0000, 4), &mut st, &mut out), None);
+    // out-of-range read is answered with zeros (stock leaks stack)
+    kb.vendor_in(&host::read(cmd::READ_RAM, 0x8004_0000, 4), &mut st, &mut out).unwrap();
+    assert_eq!(host::read_reply(&out, cmd::READ_RAM, 0x8004_0000, 4), Some(&[0u8; 4][..]));
     // serial
     assert_eq!(kb.vendor_in(&host::simple(cmd::SERIAL), &mut st, &mut out), Some(21));
 }
