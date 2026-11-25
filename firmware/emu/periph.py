@@ -206,7 +206,7 @@ class Usb(RegFile):
 
     VBUS: the board has no VBUS sense pin; firmware forces VBUS/session valid in PHY_CTRL0.
     OTGSC.ASV/AVV only follow that override after a delay (on hardware ASV still read 0 at
-    hpm-hal's first `poll`, measured by bring-up probe 7) — modelled as `VBUS_SETTLE_MS`.
+    hpm-hal's first `poll`, measured on the board) — modelled as `VBUS_SETTLE_MS`.
     `m.usb_run_at` records the first USBCMD.RS = 1 (the device attached to the bus)."""
     USBCMD, USBSTS, ENDPTPRIME, ENDPTFLUSH, PORTSC1 = 0x140, 0x144, 0x1B0, 0x1B4, 0x184
     OTGSC, PHY_CTRL0 = 0x1A4, 0x210

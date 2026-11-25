@@ -180,10 +180,15 @@ class Pwm(RegFile):
             offs.append(((c >> 4) & 0xFFFFFF) * self.m.CPU_HZ // AHB_HZ)
         return offs or [0]
 
-    def _period(self, gen):
+    def _period(self, gen, start=None):
+        """One PWM period starting at cycle `start`. Periods follow each other on the nominal
+        grid (not from "now", which is up to one basic block late): the triggers must not
+        drift against CNT, which the firmware reads to tell the mux step and to drop late
+        captures."""
         if gen != self.gen:
             return
-        start = self.m.cycles
+        if start is None:
+            start = self.m.cycles
         for step, off in enumerate(self.trigger_offsets()):
             def fire(step=step):
                 if gen == self.gen:
@@ -192,7 +197,8 @@ class Pwm(RegFile):
                             a.trigger(step)
             self.m.schedule(start + off, fire)
         self.periods += 1
-        self.m.schedule(start + self.period_cycles(), lambda: self._period(gen))
+        nxt = start + self.period_cycles()
+        self.m.schedule(nxt, lambda: self._period(gen, nxt))
 
 
 class Gptmr(RegFile):
