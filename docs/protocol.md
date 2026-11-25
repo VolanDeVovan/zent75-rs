@@ -30,10 +30,10 @@ BE <cmd> <len:LE16> <payload…> [<crc:LE16>] ED        zero-padded to 1024 byte
 | `04` | 11 | Read RAM | reply `BE 04 <13+n> <addr> <n> <data> <crc> ED`; data at `[10 : len−3]`. |
 | `1D` | 5 | Serial | reply `BE 1D 15 00 <16-byte UID> ED`. Allow ~60 ms quiet afterwards. |
 | `C0` | 6 | Switch profile | byte 4 = 0–3. The board also pushes `BE C0 06 00 <n> ED` on an Fn switch. |
-| `DA` | 6 | Diagnostic output | byte 4 ∈ {2,3} → flag 0/1 (alternate travel post-processing). Driver never sends it. |
-| `EE` | 5 | Reset config | factory defaults, re-applied. No reply. |
+| `DA` | 6 | Diagnostic output | byte 4 ∈ {2,3} → DA flag 0/1: enables the min/max accumulators of words 332–497 (travel and actuation are **not** affected). Cleared with the stream when heartbeats stop. Driver never sends it. |
+| `EE` | 5 | Reset config | factory defaults for the **active profile** only (bank 1 — calibration, types, names — untouched), saved. No reply. |
 | `FC` | 5 | Enter bootloader | jump to `0x80020000` (`boot-recovery.md`). |
-| `FE` | 6 | Calibration mode | byte 4 = 1 on (stream switches to the 1003 variant) / 0 off. |
+| `FE` | 6 | Calibration mode | byte 4 = 1 on / 0 off. While on, the engine is bypassed, **no keys are sent**, and 1003-byte frames are pushed without heartbeats (below). |
 | `FF` | 5 | Reboot | watchdog reset. |
 
 Every other command byte is ignored.
@@ -58,17 +58,26 @@ Sent ≈ 25 Hz (every 320 scans) while heartbeats arrive.
 
 | Words | Content |
 |---|---|
-| 0–82 | filtered raw ADC (rest ≈ 30000, bottom ≈ 18000) |
-| 83–165 | travel, µm |
-| 166–248 | dynamic rest baseline |
-| 249–331 | slow-tracked rest level |
-| 332–414, 415–497 | auxiliary per-key arrays (0 at rest) |
-| 498–504 | tail: `DA` flag, scan rate (8000), internal counters |
+| 0–82 | filtered raw ADC `y` (rest ≈ 30000, bottom ≈ 18000) |
+| 83–165 | travel, µm: `clamp(max_travel − hC, 0, max_travel)` |
+| 166–248 | dynamic rest baseline (moved by the rest tracker) |
+| 249–331 | **power-up baseline** (`rest0`, captured once with the first baseline; never tracked) |
+| 332–414 | DA only: running peak-to-peak of `y − baseline`, sampled every scan |
+| 415–497 | DA only: running peak-to-peak of travel, sampled per frame |
+| 498 | DA flag |
+| 499 | scans counted in the last second (8000) |
+| 500 | engine busy time in the last second, per mille (≈ 680 on stock) |
+| 501–504 | uptime in seconds, u64 LE |
 
-then CRC and `ED`. The panel uses only raw and travel.
+then CRC and `ED`. The panel uses only raw and travel. The DA accumulators start at
+min 65535 / max 0 and are never reset (toggling DA does not clear them).
 
-**1003 bytes (calibration mode, `BE FE 01`)** — header `BE FD EB 03`, then 6 snapshots × 83 raw
-words (interleaved per key), CRC, `ED`.
+**1003 bytes (calibration mode, `BE FE 01`)** — header `BE FD EB 03`, then **6 consecutive
+83-word blocks**, one per snapshot (snapshot 0 … 5, each in key order), CRC, `ED`. Each scan the
+88 averages go through `y += (x − y) >> 4` (seeded with the first sample after boot); after the
+first 8000 calibration scans since boot a snapshot is taken every 8 scans and a frame is sent
+every 6 snapshots (48 scans, ≈ 167 frames/s), without heartbeats. (Older notes said "interleaved
+per key"; that was wrong.)
 
 ## RAM map
 
@@ -98,7 +107,10 @@ words (interleaved per key), CRC, `ED`.
 
 ## Keymap codes
 
-Signed i16: modifiers −8…−1 (LCtrl…RWin), HID usages 4–119, consumer 201–225, mouse 251–255, board
-functions 301–320 (319 = 5 s reset), Fn layers 401–404, 1000 = empty. Key index runs row by row:
+Signed i16: modifiers −8…−1 (LCtrl…RWin), HID usages 4–119, consumer 201–224, mouse 251–255, board
+functions 301–320, Fn layer 401 (402–404 are inert), 1000 = empty. Consumer code 225 has no bit in
+the 24-bit consumer report and is broken on stock (it writes past the keyboard report); ours sends
+nothing for it. The 5-s reset is not keycode 319 but hard-wired Fn + physical Esc (319 is a no-op).
+Details: `docs/re-engine.md` §10. Key index runs row by row:
 Esc = 0, LShift = 59, LCtrl = 73, Space = 76, RCtrl = 79, Right = 82 (full layout:
 `panel/src/protocol/layout.ts`).
