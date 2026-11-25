@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use zent_core::device::{Keyboard, SystemAction};
-use zent_core::hid::HidState;
+use zent_core::hid::HidReports;
 use zent_core::layout::{KEY_COUNT, LED_COUNT, SCAN_HZ};
 use zent_core::protocol::REPORT_SIZE;
 
@@ -75,7 +75,7 @@ pub struct Sim {
     boot_scan: u64,
     taps: Vec<(u64, usize)>,
     hid_gen: u32,
-    last_hid: HidState,
+    last_hid: HidReports,
     offline_until: Option<Instant>,
     /// Number of vendor reports answered (for tests and logs).
     pub vendor_requests: u64,
@@ -90,7 +90,7 @@ impl Sim {
         let sensor = SensorModel::new(opts.seed, opts.noise, opts.slew_mm_s);
         let mut s = Self {
             opts,
-            kb: Box::new(Keyboard::new(SERIAL)),
+            kb: Box::new(Keyboard::new()),
             storage,
             sensor,
             leds: [[0; 3]; LED_COUNT],
@@ -102,7 +102,7 @@ impl Sim {
             boot_scan: 0,
             taps: Vec::new(),
             hid_gen: 0,
-            last_hid: HidState::default(),
+            last_hid: HidReports::EMPTY,
             offline_until: None,
             vendor_requests: 0,
         };
@@ -159,11 +159,11 @@ impl Sim {
     /// Power-up: fresh `Keyboard`, banks loaded from storage. Keys that are physically held
     /// stay held (that is how "key held at power-up" is reproduced).
     pub fn boot(&mut self) {
-        *self.kb = Keyboard::new(SERIAL);
-        self.kb.boot(&mut self.storage);
+        *self.kb = Keyboard::new();
+        self.kb.boot(SERIAL, &mut self.storage);
         self.boot_scan = self.scans;
         self.hid_gen = self.kb.hid_generation();
-        self.last_hid = HidState::default();
+        self.last_hid = HidReports::EMPTY;
         self.send_keyboard_reports(true);
         log(format!(
             "boot: profile {} (state {})",
@@ -282,9 +282,6 @@ impl Sim {
         }
         if all || h.consumer != old.consumer {
             res = res.and(k.input(&hid::consumer_report(&h)));
-        }
-        if all || h.system != old.system {
-            res = res.and(k.input(&hid::system_report(&h)));
         }
         if all || h.mouse_buttons != old.mouse_buttons {
             res = res.and(k.input(&hid::mouse_report(&h)));
@@ -499,7 +496,7 @@ impl Sim {
         );
         let _ = writeln!(s, "profile {}", self.kb.active_profile());
         let _ = writeln!(s, "uptime_ms {}", self.uptime_ms());
-        let _ = writeln!(s, "engine_ready {}", self.kb.engine_ready() as u8);
+        let _ = writeln!(s, "engine_ready {}", self.kb.engine().ready() as u8);
         let _ = writeln!(s, "hid {}", hid::describe(self.kb.hid()));
         if let Some(n) = &self.vendor_node {
             let _ = writeln!(s, "hidraw {}", n.display());
@@ -507,14 +504,14 @@ impl Sim {
         for k in 0..KEY_COUNT {
             let phys = self.sensor.travel(k);
             let tgt = self.sensor.target(k);
-            let t = self.kb.travel_um(k);
+            let t = self.kb.engine().travel(k);
             // idle keys show a few µm of noise; list only moving keys or real travel
             if phys > 0.0 || tgt > 0.0 || t >= 100 {
                 let _ = writeln!(
                     s,
                     "key {k} {} mm={phys:.3} target={tgt:.3} raw={} travel_um={t}",
                     keynames::name(k),
-                    self.kb.raw(k)
+                    self.kb.engine().raw(k)
                 );
             }
         }

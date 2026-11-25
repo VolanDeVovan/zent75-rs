@@ -6,8 +6,8 @@ use zent_core::storage::mem::MemStorage;
 
 fn boot() -> (Keyboard, MemStorage) {
     let mut st = MemStorage::default();
-    let mut kb = Keyboard::new([0x11; 16]);
-    kb.boot(&mut st);
+    let mut kb = Keyboard::new();
+    kb.boot([0x11; 16], &mut st);
     (kb, st)
 }
 
@@ -33,7 +33,7 @@ fn write_read_save_switch() {
     assert_eq!(&out[..6], &[0xBE, 0xC0, 6, 0, 1, 0xED]);
     kb.vendor_in(&host::with_arg(cmd::SWITCH_PROFILE, 0), &mut st, &mut out);
     kb.service(&mut st);
-    assert_eq!(kb.profile.key_map(46), 5);
+    assert_eq!(kb.profile().key_map(46), 5);
     // out-of-range read is answered with zeros (stock leaks stack)
     kb.vendor_in(&host::read(cmd::READ_RAM, 0x8004_0000, 4), &mut st, &mut out).unwrap();
     assert_eq!(host::read_reply(&out, cmd::READ_RAM, 0x8004_0000, 4), Some(&[0u8; 4][..]));
@@ -48,10 +48,10 @@ fn press_a_key() {
     for _ in 0..13000 {
         kb.scan(&s);
     }
-    assert_eq!(kb.hid().keyboard.pressed().count(), 0);
+    assert_eq!(kb.hid().pressed().count(), 0);
     s[KEY_TO_SLOT[46] as usize] = 20000;
     for _ in 0..50 {
         kb.scan(&s);
     }
-    assert!(kb.hid().keyboard.is_pressed(4), "A pressed");
+    assert!(kb.hid().is_pressed(4), "A pressed");
 }

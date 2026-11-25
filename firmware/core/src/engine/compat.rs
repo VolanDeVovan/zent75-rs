@@ -5,8 +5,17 @@
 //! the vendor behaviour bit for bit so the differential tests against the emulated stock engine
 //! (`tests/engine_*.rs`, `tests/keys_*.rs`) can replay traces with exact equality.
 //!
-//! Fixes that cannot change any observable output (the curve builder's out-of-bounds write) are
-//! simply not reproduced and are listed in [`NOT_REPRODUCED`].
+//! Stock behaviours that are not reproduced because nothing observable depends on them:
+//!
+//! * the curve builder writes one point past the template (lands outside the table for types
+//!   0/2/3);
+//! * codes 121–200 (below the consumer report) and 225–250 / 256–300 (past the 16-byte keyboard
+//!   report, onto the heartbeat / DA / gate flags) write outside the reports: they send nothing;
+//! * the calibration-mode frame counter runs past 48 snapshots while USB is unconfigured.
+//!
+//! Deviations outside the engine are documented where they live: the dispatcher's in
+//! `device/vendor.rs`, the bank repair's in `config.rs`, and Fn + Esc (5 s), which keeps the
+//! calibration when it wipes the config (`Keyboard::wipe`; stock erases it too).
 
 /// Runtime switches for the stock quirks. `false` = fixed behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,15 +139,3 @@ impl Guard {
         }
     }
 }
-
-/// Stock behaviours we do not reproduce because nothing observable depends on them.
-pub const NOT_REPRODUCED: &[&str] = &[
-    "curve builder writes one point past the template (lands outside the table for types 0/2/3)",
-    "codes 121-200 (below the consumer report) and 225-250 / 256-300 (past the 16-byte keyboard \
-     report, onto the heartbeat / DA / gate flags) writing outside the reports: they send nothing",
-    "calibration-mode frame counter running past 48 snapshots while USB is unconfigured",
-];
-
-/// Fn + Esc held for 5 s: stock erases both config banks including the calibration; ours keeps
-/// `top/bot` and the switch types (see `keys::Event::FactoryReset`).
-pub const HARD_RESET_KEEPS_CALIBRATION: bool = true;

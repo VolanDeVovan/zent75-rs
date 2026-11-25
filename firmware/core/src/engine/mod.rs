@@ -51,20 +51,6 @@ const XT_SRC: [[u8; 3]; N] = {
 };
 const IIR_ACC_LIMIT: i32 = 0x70000;
 
-/// Bank-1 / bank-2 offsets read by the engine.
-const B1_TOP: usize = 0x000;
-const B1_BOT: usize = 0x0B0;
-const B1_TYPE: usize = 0x160;
-const B2_AUTO_CALIB: usize = 0xC71;
-
-#[inline]
-fn rd16(b: &[u8], off: usize) -> u16 {
-    match b.get(off..off + 2) {
-        Some(s) => u16::from_le_bytes([s[0], s[1]]),
-        None => 0,
-    }
-}
-
 /// RISC-V `div`: truncating, `x/0 = −1`, `MIN/−1 = MIN`.
 #[inline]
 pub(crate) fn div_rv(a: i32, b: i32) -> i32 {
@@ -277,15 +263,14 @@ impl Engine {
         let mut used = [false; TYPES];
         for s in 0..N {
             let k = SLOT_TO_OBJ[s] as usize;
-            let t = type_of_code(rd16(&g.0, B1_TYPE + 2 * k));
+            let t = type_of_code(g.keytype(k) as u16);
             self.typ[s] = t;
             used[t as usize & 7] = true;
         }
         self.curves.build(&used, g);
         for s in 0..N {
             let k = SLOT_TO_OBJ[s] as usize;
-            let top = rd16(&g.0, B1_TOP + 2 * k);
-            let bot = rd16(&g.0, B1_BOT + 2 * k);
+            let (top, bot) = (g.top_value(k), g.bot_value(k));
             let changed = top != self.stored_top[s] || bot != self.stored_bot[s];
             self.stored_top[s] = top;
             self.stored_bot[s] = bot;
@@ -306,17 +291,13 @@ impl Engine {
             let k = if self.compat.object_step_quirk { OBJ_TO_SLOT[s] as usize } else { SLOT_TO_OBJ[s] as usize };
             self.act_thr[s] = (self.max_s[OBJ_TO_SLOT[k] as usize] - 100) as i16;
         }
-        self.autocal = p.0.get(B2_AUTO_CALIB) == Some(&1);
+        self.autocal = p.auto_calibration();
     }
 
     /// Stock `FUN_10E28` engine init with the samples read at power-up (before the scan
     /// timer starts): dead-zone signs, auto-cal reference, initial averages. Without this call
     /// the first scan's samples are used.
     pub fn init_samples(&mut self, samples: &[u16; SLOT_COUNT]) {
-        self.init(samples);
-    }
-
-    fn init(&mut self, samples: &[u16; N]) {
         for s in 0..N {
             let x = samples[s] as i32;
             self.raw_s[s] = x;
@@ -335,20 +316,18 @@ impl Engine {
         self.warm = self.warm.max(WARMUP_SCANS - 1);
     }
 
+    /// Calibration mode (`BE FE 01`): the engine is bypassed and only the calibration frames run.
     pub fn set_calibration(&mut self, on: bool) {
         self.cal_on = on;
     }
 
-    /// DA diagnostics (`BE DA 03`): enables the min/max accumulators (words 332–497).
+    /// DA diagnostics (`BE DA 03`): enables the min/max accumulators (words 332–497) and sets
+    /// word 498 of the stream frame.
     pub fn set_diag(&mut self, on: bool) {
         self.diag = on;
     }
-
-    /// Frame-tail statistics measured by the platform: scans counted in the last second and the
-    /// engine busy time in per mille.
-    pub fn set_stats(&mut self, scans_per_s: u16, busy_permille: u16) {
-        self.scans_per_s = scans_per_s;
-        self.busy_permille = busy_permille;
+    pub fn diag(&self) -> bool {
+        self.diag
     }
 
     /// Call once per second: latches the scans counted since the previous call (word 499),
@@ -358,10 +337,6 @@ impl Engine {
         self.scans_this_s = 0;
         self.busy_permille = busy_permille;
         self.uptime_s += 1;
-    }
-
-    pub fn set_uptime(&mut self, s: u64) {
-        self.uptime_s = s;
     }
 
     /// True once the baseline has been captured and keys are evaluated.
@@ -442,15 +417,14 @@ impl Engine {
 
     // ------------------------------------------------------------------ scan
 
-    /// One full scan. `samples` are averaged ADC counts indexed by scan slot. `cal` = calibration
-    /// mode (`BE FE 01`): the engine is bypassed and only the calibration frames run.
-    pub fn scan(&mut self, samples: &[u16; SLOT_COUNT], _g: &Global, _p: &Profile, cal: bool) {
+    /// One full scan. `samples` are averaged ADC counts indexed by scan slot.
+    pub fn scan(&mut self, samples: &[u16; SLOT_COUNT]) {
         if !self.initialized {
-            self.init(samples);
+            self.init_samples(samples);
         }
         self.scans_this_s = self.scans_this_s.wrapping_add(1);
         self.pass = KeyPass::None;
-        if cal || self.cal_on {
+        if self.cal_on {
             self.cal_scan(samples);
             return;
         }
@@ -803,9 +777,9 @@ impl Engine {
     // ------------------------------------------------------------------ BE FD stream
 
     /// Build the 1017-byte `BE FD` frame (stock: every 320 scans while the heartbeat is alive).
-    /// `diag` = DA flag (word 498); while set, the travel min/max accumulators are sampled here.
-    pub fn stream_frame(&mut self, out: &mut [u8; REPORT_SIZE], diag: bool) -> usize {
-        self.diag = diag;
+    /// While the DA flag is set, the travel min/max accumulators are sampled here.
+    pub fn stream_frame(&mut self, out: &mut [u8; REPORT_SIZE]) -> usize {
+        let diag = self.diag;
         let mut travel_s = [0i32; N];
         for s in 0..N {
             let m = self.max_s[s];

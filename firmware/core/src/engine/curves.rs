@@ -13,11 +13,8 @@ pub const TABLE_LEN: usize = 0xA61;
 pub const F_FULL: i32 = 2636;
 /// Switch types: 0..3 built in, 4..7 = custom records 0..3 of bank 1 (codes 4095..4092).
 pub const TYPES: usize = 8;
-/// Bank-1 offset of custom switch record 0 (type 4), 256 bytes each.
-const CUSTOM_BASE: usize = 0x390;
-const CUSTOM_STRIDE: usize = 0x100;
 /// Most points a curve may have (stock validation of the custom records).
-const MAX_POINTS: usize = 88;
+const MAX_POINTS: usize = crate::config::CURVE_MAX;
 
 /// `f` positions per lookup bucket (speeds the segment search up to a few compares).
 const BUCKET_SHIFT: u32 = 5;
@@ -188,21 +185,18 @@ impl Curves {
 
 /// Custom record `i` of bank 1: (point count, full travel), template copied into `out`.
 fn custom_record(g: &Global, i: usize, out: &mut [i16; MAX_POINTS]) -> Option<(usize, i32)> {
-    let o = CUSTOM_BASE + CUSTOM_STRIDE * i;
-    let b = &g.0;
-    let rd32 = |off: usize| b.get(off..off + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
-    let max = rd32(o)? as i32;
-    let n = rd32(o + 4)? as usize;
-    if !(2..=MAX_POINTS).contains(&n) || b.len() < o + 8 + 2 * n {
+    let rec = g.custom_switch(i);
+    let n = rec.points();
+    if !(2..=MAX_POINTS).contains(&n) {
         return None;
     }
     for (k, v) in out.iter_mut().take(n).enumerate() {
-        *v = i16::from_le_bytes([b[o + 8 + 2 * k], b[o + 9 + 2 * k]]);
+        *v = rec.point(k);
     }
     if out[..n].windows(2).any(|w| w[0] > w[1]) {
         return None; // stock's boot repair replaces a non-monotonic record
     }
-    Some((n, max))
+    Some((n, rec.travel_um() as i32))
 }
 
 #[cfg(test)]

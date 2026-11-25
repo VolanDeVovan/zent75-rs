@@ -32,7 +32,7 @@ use hpm_hal::pac;
 use hpm_hal::peripherals;
 use hpm_hal::usb::{EndpointState, UsbDriver};
 use static_cell::StaticCell;
-use zent_core::hid::HidState;
+use zent_core::hid::descriptor;
 use zent_core::protocol::REPORT_SIZE;
 
 use crate::shared::{self, with_kb, STORAGE};
@@ -70,128 +70,18 @@ pub const SERIAL: &str = "20240728";
 /// reach the host as an empty HID report after each 3-byte report. 4 avoids that.
 const SMALL_EP_MPS: u16 = 4;
 
-// ------------------------------------------------------------------ report descriptors
-
-/// Keyboard (stock @0x800420D4, 61 B): modifiers + bitmap of usages 0x00..0x77, LED output.
-pub const KEYBOARD_REPORT_DESC: [u8; 61] = [
-    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x75, 0x01, 0x95, 0x08, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00,
-    0x25, 0x01, 0x81, 0x02, 0x95, 0x78, 0x75, 0x01, 0x15, 0x00, 0x25, 0x01, 0x05, 0x07, 0x19, 0x00, 0x29, 0x77,
-    0x81, 0x02, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02,
-    0x95, 0x01, 0x75, 0x03, 0x91, 0x03, 0xC0,
-];
-
-/// Consumer-page usages of the 24 bits of the consumer report, LSB of byte 0 first.
-pub const CONSUMER_USAGES: [u16; 24] = [
-    0x0E9, 0x0EA, 0x0E2, 0x0CD, 0x0B7, 0x0B6, 0x0B5, 0x192, 0x18A, 0x194, 0x221, 0x223, 0x224, 0x226, 0x225,
-    0x227, 0x22A, 0x19F, 0x183, 0x06F, 0x070, 0x2A0, 0x29F, 0x1CB,
-];
-
-/// Consumer (stock @0x80040A1C, 80 B), built from [`CONSUMER_USAGES`].
-pub const CONSUMER_REPORT_DESC: [u8; 80] = {
-    let mut d = [0u8; 80];
-    let head = [0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01];
-    let tail = [0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x18, 0x81, 0x02, 0xC0];
-    let mut n = 0;
-    let mut i = 0;
-    while i < head.len() {
-        d[n] = head[i];
-        n += 1;
-        i += 1;
-    }
-    let mut u = 0;
-    while u < CONSUMER_USAGES.len() {
-        let v = CONSUMER_USAGES[u];
-        if v <= 0xFF {
-            d[n] = 0x09;
-            d[n + 1] = v as u8;
-            n += 2;
-        } else {
-            d[n] = 0x0A;
-            d[n + 1] = v as u8;
-            d[n + 2] = (v >> 8) as u8;
-            n += 3;
-        }
-        u += 1;
-    }
-    i = 0;
-    while i < tail.len() {
-        d[n] = tail[i];
-        n += 1;
-        i += 1;
-    }
-    assert!(n == 80);
-    d
-};
-
-/// Vendor (stock @0x800409F8, 36 B): 1024-byte input + output, usage page 0xFF60 / 0x61.
-pub const VENDOR_REPORT_DESC: [u8; 36] = [
-    0x06, 0x60, 0xFF, 0x09, 0x61, 0xA1, 0x01, 0x05, 0x62, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x96, 0x00, 0x04, 0x75,
-    0x08, 0x81, 0x02, 0x05, 0x63, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x96, 0x00, 0x04, 0x75, 0x08, 0x91, 0x02, 0xC0,
-];
-
-/// Mouse (stock @0x80041C68, 50 B): 5 buttons, X, Y (relative i8), no wheel.
-pub const MOUSE_REPORT_DESC: [u8; 50] = [
-    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00,
-    0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x03, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30,
-    0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xC0, 0xC0,
-];
-
 /// (class, subclass, protocol), bcdHID, report descriptor.
 type InterfaceDef = ((u8, u8, u8), u16, &'static [u8]);
 /// The four interfaces in descriptor order.
 const INTERFACES: [InterfaceDef; 4] = [
-    ((0x03, 0x01, 0x01), 0x0111, &KEYBOARD_REPORT_DESC),
-    ((0x03, 0x00, 0x00), 0x0100, &CONSUMER_REPORT_DESC),
-    ((0x03, 0x00, 0x00), 0x0111, &VENDOR_REPORT_DESC),
-    ((0x03, 0x01, 0x02), 0x0111, &MOUSE_REPORT_DESC),
+    ((0x03, 0x01, 0x01), 0x0111, &descriptor::KEYBOARD),
+    ((0x03, 0x00, 0x00), 0x0100, &descriptor::CONSUMER),
+    ((0x03, 0x00, 0x00), 0x0111, &descriptor::VENDOR),
+    ((0x03, 0x01, 0x02), 0x0111, &descriptor::MOUSE),
 ];
 
 fn hid_descriptor(bcd: u16, report_len: usize) -> [u8; 7] {
     [bcd as u8, (bcd >> 8) as u8, 0x00, 0x01, 0x22, report_len as u8, (report_len >> 8) as u8]
-}
-
-// ------------------------------------------------------------------ report encoding
-
-/// Modifier byte: the core's modifier field plus any usages 0xE0..0xE7 in the key bitmap.
-fn modifiers(h: &HidState) -> u8 {
-    h.keyboard.modifiers | h.keyboard.keys[0xE0 / 8]
-}
-
-/// 16-byte NKRO report: modifiers, then bit `u % 8` of byte `1 + u / 8` for usages 0..=0x77.
-pub fn keyboard_report(h: &HidState) -> [u8; 16] {
-    let mut r = [0u8; 16];
-    r[0] = modifiers(h);
-    r[1..16].copy_from_slice(&h.keyboard.keys[..15]);
-    r
-}
-
-/// 8-byte boot-protocol report `[mods, 0, k1..k6]`, ErrorRollOver on overflow.
-pub fn boot_report(h: &HidState) -> [u8; 8] {
-    let mut r = [0u8; 8];
-    r[0] = modifiers(h);
-    for (n, u) in h.keyboard.pressed().filter(|&u| u < 0xE0).enumerate() {
-        if n == 6 {
-            r[2..8].fill(0x01);
-            break;
-        }
-        r[2 + n] = u;
-    }
-    r
-}
-
-/// 3-byte consumer bitmap for the single held consumer usage (0 = none).
-pub fn consumer_report(h: &HidState) -> [u8; 3] {
-    let mut r = [0u8; 3];
-    if h.consumer != 0 {
-        if let Some(i) = CONSUMER_USAGES.iter().position(|&u| u == h.consumer) {
-            r[i / 8] |= 1 << (i % 8);
-        }
-    }
-    r
-}
-
-pub fn mouse_report(h: &HidState) -> [u8; 3] {
-    [h.mouse_buttons & 0x1F, 0, 0]
 }
 
 // ------------------------------------------------------------------ control requests
@@ -339,12 +229,12 @@ async fn keyboard_task(mut ep: EpIn) -> ! {
         loop {
             let h = with_kb(|kb| *kb.hid());
             let boot = BOOT_PROTOCOL.load(Ordering::Relaxed);
-            let r = keyboard_report(&h);
+            let r = h.keyboard;
             if r == last && boot == last_boot {
                 break;
             }
             wake_host().await;
-            let res = if boot { ep.write(&boot_report(&h)).await } else { ep.write(&r).await };
+            let res = if boot { ep.write(&h.boot_report()).await } else { ep.write(&r).await };
             if res.is_err() {
                 last = [0xFF; 16];
                 break;
@@ -362,7 +252,7 @@ async fn consumer_task(mut ep: EpIn) -> ! {
         ep.wait_enabled().await;
         scan::HID_CONSUMER.wait().await;
         loop {
-            let r = with_kb(|kb| consumer_report(kb.hid()));
+            let r = with_kb(|kb| kb.hid().consumer);
             if r == last {
                 break;
             }
@@ -383,7 +273,7 @@ async fn mouse_task(mut ep: EpIn) -> ! {
         ep.wait_enabled().await;
         scan::HID_MOUSE.wait().await;
         loop {
-            let r = with_kb(|kb| mouse_report(kb.hid()));
+            let r = with_kb(|kb| kb.hid().mouse_report());
             if r == last {
                 break;
             }

@@ -25,8 +25,6 @@ pub enum Bind {
     None,
     Group,
     Dks,
-    /// Any other mode value: listed, but its handler does nothing.
-    Inert,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -355,11 +353,11 @@ impl Obj {
         match self.bind {
             Bind::Group => {
                 for j in 0..4 {
-                    self.out[j] = if self.scode[j] != 1000 { self.pressed } else { 0 };
+                    self.out[j] = if self.scode[j] != crate::keycode::NONE { self.pressed } else { 0 };
                 }
             }
             Bind::Dks => self.dks_step(i, seed),
-            Bind::None | Bind::Inert => {}
+            Bind::None => {}
         }
     }
 

@@ -24,11 +24,11 @@ fn per_scan_cost() {
     let mut e = Box::new(Engine::new());
     let mut k = Box::new(KeyProcessor::new());
     e.configure(&g, &p);
-    k.configure(&p);
+    k.invalidate();
     let mut s = [30000u16; SLOT_COUNT];
     for _ in 0..13000 {
-        e.scan(&s, &g, &p, false);
-        k.update(&e, &p, &g);
+        e.scan(&s);
+        k.update(&e, &p);
     }
     let n = 200_000u32;
     let mut x = 1u32;
@@ -44,9 +44,9 @@ fn per_scan_cost() {
             s[OBJ_TO_SLOT[key] as usize] = 30000 - ((i % 2000) as i32 - 1000).unsigned_abs() as u16 * 12;
         }
         let t1 = Instant::now();
-        e.scan(std::hint::black_box(&s), &g, &p, false);
+        e.scan(std::hint::black_box(&s));
         let t2 = Instant::now();
-        std::hint::black_box(k.update(&e, &p, &g));
+        std::hint::black_box(k.update(&e, &p));
         te += (t2 - t1).as_nanos();
         tk += t2.elapsed().as_nanos();
     }

@@ -7,7 +7,14 @@
 //!   lighting, DKS.
 //!
 //! The NOR images are plain copies of these arrays (no header or CRC). All per-key arrays have 88
-//! entries (keys 0..82, 83..87 spare). Typed accessors below read/write fields in place.
+//! entries (keys 0..82, 83..87 spare).
+//!
+//! **Why byte banks and not typed structs.** The byte layout *is* the interface: the vendor
+//! protocol reads and writes arbitrary byte ranges of it, NOR stores it verbatim, and the stock
+//! firmware must find its own banks again after a roll-back. [`Global`] and [`Profile`] therefore
+//! own the raw image and expose typed accessors that read/write fields in place; the offsets
+//! ([`b1`], [`b2`], [`cs`], [`bind`]) are defined here and nowhere else in the firmware. The raw
+//! array (`.0`) is for the protocol, storage and tests.
 //!
 //! Boot-time validation and repair reproduce stock `FUN_0000DD24` (bank 1) and
 //! `FUN_00011822`/`FUN_0000CD56` (profile) exactly, so banks the stock firmware wrote load
@@ -47,8 +54,8 @@ pub const CUSTOM_SWITCH_SIZE: usize = 256;
 pub const CUSTOM_SWITCH_COUNT: usize = 4;
 /// Maximum points of a custom switch curve.
 pub const CURVE_MAX: usize = 88;
-/// Keymap value meaning "empty".
-pub const KC_NONE: i16 = 1000;
+/// Keymap layers of a profile: 0 = main, 1 = Fn.
+pub const LAYERS: usize = 2;
 /// `soft_version` the stock 0.0.18 firmware forces on every boot.
 pub const STOCK_SOFT_VERSION: u32 = 0x12;
 
@@ -88,9 +95,9 @@ pub const CURVE_LAST: i16 = 2636;
 
 /// Field offsets inside bank 2.
 pub mod b2 {
-    /// i16[88] extra keycode layers A/B (run-time key struct +0x10/+0x12), default 1000.
-    pub const LAYER_A: usize = 0x000;
-    pub const LAYER_B: usize = 0x0B0;
+    /// i16[88] tap-hold codes of the main / Fn layer (sent after 0.5 s held), 1000 = off.
+    pub const HOLD_CODE: usize = 0x000;
+    pub const HOLD_CODE_FN: usize = 0x0B0;
     pub const KEY_MAP: usize = 0x160;
     pub const KEY_MAP_FN: usize = 0x210;
     pub const PRESS_TH: usize = 0x2C0;
@@ -102,9 +109,10 @@ pub mod b2 {
     pub const KEY_MODE: usize = 0x6E0;
     /// u8[88], forced to `FF` on every profile load.
     pub const FORCED_738: usize = 0x738;
-    /// u8[88] companions of layers A / B (key struct +0x14/+0x15), default 0.
-    pub const LAYER_A_EXT: usize = 0x790;
-    pub const LAYER_B_EXT: usize = 0x7E8;
+    /// u8[88] modifier masks of the main / Fn layer, ORed into the modifier byte while the key
+    /// is pressed; default 0.
+    pub const MOD_MASK: usize = 0x790;
+    pub const MOD_MASK_FN: usize = 0x7E8;
     /// u16[88], forced to `FFFF` on every profile load.
     pub const FORCED_840: usize = 0x840;
     /// u16[88] written by reset (100), no reader known.
@@ -136,6 +144,23 @@ pub mod b2 {
     /// reload the lighting (stock); everything else re-derives keys + lighting.
     pub const LIGHT_WINDOW_START: usize = 0xA20;
     pub const LIGHT_WINDOW_END: usize = 0xC60;
+}
+
+/// Field offsets inside a 48-byte `bind_key_setting` record (key group / DKS).
+pub mod bind {
+    /// u8[4][4]: DKS action of member `i` in phase `ph` at `4·i + ph` (0 end, 1 hold, 2 tap).
+    pub const ACTIONS: usize = 0;
+    /// i16[4] member keycodes, 1000 = unused.
+    pub const CODES: usize = 16;
+    /// u16 top / bottom trigger points, µm of travel.
+    pub const TOP_POINT: usize = 24;
+    pub const BOTTOM_POINT: usize = 26;
+    /// u16 tap timing in scans: pressed time, delay, random extra delay.
+    pub const TAP_SINGLE: usize = 28;
+    pub const TAP_DELAY: usize = 30;
+    pub const TAP_RANDOM: usize = 32;
+    /// u8: 1 = the key's own code is suppressed, 0 = sent as well; `FF` marks a blank record.
+    pub const SUPPRESS: usize = 47;
 }
 
 /// Where a `BE 03` / `BE 04` range lands, per the stock dispatcher's range checks.
@@ -176,11 +201,6 @@ pub fn locate_read(addr: u32, n: usize) -> Option<(Bank, usize)> {
     } else {
         None
     }
-}
-
-/// Bank-1 / bank-2 range check (reads and writes; kept for the simulator's backup loader).
-pub fn locate(addr: u32, n: usize) -> Option<(Bank, usize)> {
-    locate_read(addr, n.min(512)).filter(|_| n <= 512)
 }
 
 macro_rules! u16_array {
@@ -271,9 +291,10 @@ impl Global {
         let o = b1::CONFIG_NAME + NAME_SIZE * profile;
         (&mut self.0[o..o + NAME_SIZE]).try_into().unwrap()
     }
-    pub fn custom_switch(&self, i: usize) -> &[u8; CUSTOM_SWITCH_SIZE] {
+    /// Custom switch record `i` (0..[`CUSTOM_SWITCH_COUNT`]).
+    pub fn custom_switch(&self, i: usize) -> CustomSwitch<'_> {
         let o = b1::CUSTOM_SWITCH + CUSTOM_SWITCH_SIZE * i;
-        self.0[o..o + CUSTOM_SWITCH_SIZE].try_into().unwrap()
+        CustomSwitch(self.0[o..o + CUSTOM_SWITCH_SIZE].try_into().unwrap())
     }
     pub fn custom_switch_mut(&mut self, i: usize) -> &mut [u8; CUSTOM_SWITCH_SIZE] {
         let o = b1::CUSTOM_SWITCH + CUSTOM_SWITCH_SIZE * i;
@@ -285,7 +306,7 @@ impl Global {
         match self.keytype(key) {
             1 => 3375,
             3 => 3780,
-            c @ 0xFFC..=0xFFF => rd_u32(self.custom_switch(0xFFF - c as usize), cs::TRAVEL),
+            c @ 0xFFC..=0xFFF => self.custom_switch(0xFFF - c as usize).travel_um(),
             _ => 3420,
         }
     }
@@ -316,7 +337,7 @@ impl Global {
         let top_blank = self.top_value(0) == 0xFFFF;
         let bot_blank = self.bot_value(0) == 0xFFFF;
         let names_ok = (0..PROFILE_COUNT).all(|i| self.name(i)[0] != 0xFF);
-        let cs_ok = (0..CUSTOM_SWITCH_COUNT).all(|i| custom_switch_valid(self.custom_switch(i)));
+        let cs_ok = (0..CUSTOM_SWITCH_COUNT).all(|i| self.custom_switch(i).is_valid());
         let rest_ok = (cur as usize) < PROFILE_COUNT && !kt_blank && !top_blank && !bot_blank && names_ok && cs_ok;
         if !ver_ok {
             self.set_soft_version(version);
@@ -343,7 +364,7 @@ impl Global {
             }
         }
         for i in 0..CUSTOM_SWITCH_COUNT {
-            if !custom_switch_valid(self.custom_switch(i)) {
+            if !self.custom_switch(i).is_valid() {
                 crate::defaults::custom_switch(self.custom_switch_mut(i), i);
             }
         }
@@ -356,39 +377,71 @@ impl Global {
     }
 }
 
-/// Stock `FUN_000148F8`.
-pub fn custom_switch_valid(r: &[u8; CUSTOM_SWITCH_SIZE]) -> bool {
-    let travel = rd_u32(r, cs::TRAVEL);
-    if !(1500..=4200).contains(&travel) {
-        return false;
+/// Typed view of one 256-byte custom switch record ([`cs`] offsets).
+#[derive(Clone, Copy)]
+pub struct CustomSwitch<'a>(&'a [u8; CUSTOM_SWITCH_SIZE]);
+
+impl CustomSwitch<'_> {
+    /// Full travel in µm.
+    pub fn travel_um(&self) -> u32 {
+        rd_u32(self.0, cs::TRAVEL)
     }
-    let n = rd_u32(r, cs::POINTS) as usize;
-    if n > CURVE_MAX || r[cs::NAME] == 0xFF || rd_u32(r, cs::WORD_F8) == 0xFFFF || r[cs::BYTE_FC] == 0xFF {
-        return false;
+    /// Number of curve points as stored (unchecked).
+    pub fn points(&self) -> usize {
+        rd_u32(self.0, cs::POINTS) as usize
     }
-    // stock reads point n−1 (for n = 0 the high half of the count, i.e. 0) and requires 2636
-    let pt = |i: usize| rd_u16(r, cs::CURVE + 2 * i) as i16;
-    let last = if n == 0 { rd_u16(r, cs::POINTS + 2) as i16 } else { pt(n - 1) };
-    last == CURVE_LAST && (1..n).all(|i| pt(i - 1) <= pt(i))
+    /// Curve point `i` (`i <` [`CURVE_MAX`]).
+    pub fn point(&self, i: usize) -> i16 {
+        rd_u16(self.0, cs::CURVE + 2 * i) as i16
+    }
+
+    /// Stock `FUN_000148F8`.
+    pub fn is_valid(&self) -> bool {
+        let r = self.0;
+        if !(1500..=4200).contains(&self.travel_um()) {
+            return false;
+        }
+        let n = self.points();
+        if n > CURVE_MAX || r[cs::NAME] == 0xFF || rd_u32(r, cs::WORD_F8) == 0xFFFF || r[cs::BYTE_FC] == 0xFF {
+            return false;
+        }
+        // stock reads point n−1 (for n = 0 the high half of the count, i.e. 0) and requires 2636
+        let last = if n == 0 { rd_u16(r, cs::POINTS + 2) as i16 } else { self.point(n - 1) };
+        last == CURVE_LAST && (1..n).all(|i| self.point(i - 1) <= self.point(i))
+    }
 }
 
 /// One profile (bank 2).
 #[derive(Clone)]
 pub struct Profile(pub [u8; BANK2_SIZE]);
 
-/// Per-key actuation mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyMode {
-    Normal,
-    RapidTrigger,
-}
+/// Typed view of one 48-byte key-group / DKS record ([`bind`] offsets).
+#[derive(Clone, Copy)]
+pub struct BindRecord<'a>(&'a [u8; BIND_RECORD_SIZE]);
 
-/// Per-key advanced binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindMode {
-    None,
-    Group,
-    Dks,
+impl BindRecord<'_> {
+    /// DKS action of member `i` in phase `phase`.
+    pub fn action(&self, i: usize, phase: usize) -> u8 {
+        self.0[bind::ACTIONS + 4 * i + phase]
+    }
+    /// Keycode of member `i`.
+    pub fn code(&self, i: usize) -> i16 {
+        rd_u16(self.0, bind::CODES + 2 * i) as i16
+    }
+    pub fn top_point(&self) -> u16 {
+        rd_u16(self.0, bind::TOP_POINT)
+    }
+    pub fn bottom_point(&self) -> u16 {
+        rd_u16(self.0, bind::BOTTOM_POINT)
+    }
+    /// Tap timing in scans: (pressed time, delay, random extra delay).
+    pub fn tap_times(&self) -> (u16, u16, u16) {
+        (rd_u16(self.0, bind::TAP_SINGLE), rd_u16(self.0, bind::TAP_DELAY), rd_u16(self.0, bind::TAP_RANDOM))
+    }
+    /// The key's own code is suppressed while the binding is active (byte 47 = 1).
+    pub fn suppress_original(&self) -> bool {
+        self.0[bind::SUPPRESS] == 1
+    }
 }
 
 /// The fixed Fn-layer shortcuts stock re-imposes on every profile load, bank-1 save and reset
@@ -415,8 +468,6 @@ impl Profile {
     pub const fn blank() -> Self {
         Self([0xFF; BANK2_SIZE])
     }
-    i16_array!(layer_a, set_layer_a, b2::LAYER_A);
-    i16_array!(layer_b, set_layer_b, b2::LAYER_B);
     i16_array!(key_map, set_key_map, b2::KEY_MAP);
     i16_array!(key_map_fn, set_key_map_fn, b2::KEY_MAP_FN);
     u16_array!(press_th, set_press_th, b2::PRESS_TH);
@@ -427,25 +478,47 @@ impl Profile {
     u16_array!(norm_return_th, set_norm_return_th, b2::NORM_RETURN_TH);
     i16_array!(cancel_code, set_cancel_code, b2::KEY_CANCEL_CODE);
 
-    pub fn key_mode(&self, key: usize) -> KeyMode {
-        if self.0[b2::KEY_MODE + key] == 1 { KeyMode::RapidTrigger } else { KeyMode::Normal }
+    /// Keycode of `key` on `layer` (0 main, 1 Fn).
+    #[inline]
+    pub fn code(&self, layer: usize, key: usize) -> i16 {
+        rd_u16(&self.0, [b2::KEY_MAP, b2::KEY_MAP_FN][layer] + 2 * key) as i16
     }
-    pub fn key_mode_raw(&self, key: usize) -> u8 {
+    /// Tap-hold code of `key` on `layer` ([`crate::keycode::NONE`] = off).
+    #[inline]
+    pub fn hold_code(&self, layer: usize, key: usize) -> i16 {
+        rd_u16(&self.0, [b2::HOLD_CODE, b2::HOLD_CODE_FN][layer] + 2 * key) as i16
+    }
+    pub fn set_hold_code(&mut self, layer: usize, key: usize, code: i16) {
+        wr_u16(&mut self.0, [b2::HOLD_CODE, b2::HOLD_CODE_FN][layer] + 2 * key, code as u16)
+    }
+    /// Modifier mask of `key` on `layer`.
+    #[inline]
+    pub fn mod_mask(&self, layer: usize, key: usize) -> u8 {
+        self.0[[b2::MOD_MASK, b2::MOD_MASK_FN][layer] + key]
+    }
+    pub fn set_mod_mask(&mut self, layer: usize, key: usize, mask: u8) {
+        self.0[[b2::MOD_MASK, b2::MOD_MASK_FN][layer] + key] = mask;
+    }
+    /// `key_mode`: 0 normal, 1 rapid trigger, 2 rapid trigger below the normal press point.
+    #[inline]
+    pub fn key_mode(&self, key: usize) -> u8 {
         self.0[b2::KEY_MODE + key]
     }
-    pub fn set_key_mode_raw(&mut self, key: usize, v: u8) {
+    pub fn set_key_mode(&mut self, key: usize, v: u8) {
         self.0[b2::KEY_MODE + key] = v;
     }
-    pub fn bind_mode(&self, key: usize) -> BindMode {
-        match self.0[b2::BIND_KEY_MODE + key] {
-            1 => BindMode::Group,
-            2 => BindMode::Dks,
-            _ => BindMode::None,
-        }
+    /// `bind_key_mode`: 0 none, 1 key group, 2 DKS.
+    #[inline]
+    pub fn bind_mode(&self, key: usize) -> u8 {
+        self.0[b2::BIND_KEY_MODE + key]
     }
     pub fn bind_record(&self, key: usize) -> &[u8; BIND_RECORD_SIZE] {
         let o = b2::BIND_KEY_SETTING + BIND_RECORD_SIZE * key;
         self.0[o..o + BIND_RECORD_SIZE].try_into().unwrap()
+    }
+    /// Typed view of the key-group / DKS record of `key`.
+    pub fn bind(&self, key: usize) -> BindRecord<'_> {
+        BindRecord(self.bind_record(key))
     }
     pub fn bind_record_mut(&mut self, key: usize) -> &mut [u8; BIND_RECORD_SIZE] {
         let o = b2::BIND_KEY_SETTING + BIND_RECORD_SIZE * key;
@@ -470,8 +543,37 @@ impl Profile {
     pub fn set_effect(&mut self, e: u8) {
         self.0[b2::RGB_MODE] = (e << 2) | (self.0[b2::RGB_MODE] & 3);
     }
-    pub fn flag(&self, off: usize) -> bool {
-        self.0[off] != 0
+    /// LED-flag mask of the effects (`rgb_config[5]`).
+    pub fn rgb_flags(&self) -> u8 {
+        self.0[b2::RGB_FLAGS]
+    }
+    /// Stored brightness step (0..=30).
+    pub fn set_brightness(&mut self, b: u8) {
+        self.0[b2::RGB_BRIGHTNESS] = b;
+    }
+    /// Master lighting switch (`rgb_enable`).
+    pub fn rgb_enabled(&self) -> bool {
+        self.0[b2::RGB_ENABLE] != 0
+    }
+    /// Keycode 315: stock computes `1 − rgb_enable`.
+    pub fn toggle_rgb_enabled(&mut self) {
+        self.0[b2::RGB_ENABLE] = 1u8.wrapping_sub(self.0[b2::RGB_ENABLE]);
+    }
+    /// Caps Lock indicator enabled (`cap_enable`).
+    pub fn caps_indicator(&self) -> bool {
+        self.0[b2::CAP_ENABLE] != 0
+    }
+    /// Fn-layer highlight enabled (`rgb_fn_enable`).
+    pub fn fn_highlight(&self) -> bool {
+        self.0[b2::RGB_FN_ENABLE] != 0
+    }
+    /// WinLock indicator enabled (`win_lock_state` = 1 exactly, like stock).
+    pub fn win_lock_indicator(&self) -> bool {
+        self.0[b2::WIN_LOCK_STATE] == 1
+    }
+    /// Auto-calibration enabled (`auto_calib_enable` = 1 exactly, like stock).
+    pub fn auto_calibration(&self) -> bool {
+        self.0[b2::AUTO_CALIB_ENABLE] == 1
     }
     /// Stock lighting reload clamps the brightness to 30 and writes it back; returns the
     /// run-time value V = 6 × brightness (≤ 180).
@@ -518,7 +620,10 @@ impl Profile {
     fn bind_record_valid(&self, k: usize) -> bool {
         let r = self.bind_record(k);
         // stock compares the trigger points signed
-        self.0[b2::BIND_KEY_MODE + k] <= 2 && rd_u16(r, 0x1A) as i16 <= 5000 && rd_u16(r, 0x18) as i16 <= 5000 && r[0x2F] != 0xFF
+        self.bind_mode(k) <= 2
+            && rd_u16(r, bind::BOTTOM_POINT) as i16 <= 5000
+            && rd_u16(r, bind::TOP_POINT) as i16 <= 5000
+            && r[bind::SUPPRESS] != 0xFF
     }
     fn binds_all_invalid(&self) -> bool {
         (0..KEY_SLOTS).all(|k| !self.bind_record_valid(k))
@@ -528,10 +633,12 @@ impl Profile {
     pub fn is_valid(&self) -> bool {
         !(all_ffff(&self.0, b2::KEY_MAP)
             || all_ffff(&self.0, b2::KEY_MAP_FN)
-            || self.layer_a(0) > 1000
+            // signed compare, as stock: a blank (`FFFF` = −1) hold code passes
+            || self.hold_code(0, 0) > 1000
             || self.thresholds_bad()
             || self.sleep_seconds() > 3600
-            || rd_u32(&self.0, b2::RGB_CONFIG) == u32::MAX
+            // stock tests only the low half here; the repair below tests the whole word
+            || rd_u16(&self.0, b2::RGB_CONFIG) == 0xFFFF
             || all_ffff(&self.0, b2::KEY_CANCEL_CODE)
             || self.binds_all_invalid()
             || self.0[b2::WIN_LOCK_STATE] > 10
@@ -554,8 +661,8 @@ impl Profile {
         if all_ffff(&self.0, b2::KEY_CANCEL_CODE) {
             d::reset_cancel(self);
         }
-        if all_ffff(&self.0, b2::LAYER_A) {
-            d::reset_layers(self);
+        if all_ffff(&self.0, b2::HOLD_CODE) {
+            d::reset_tap_hold(self);
         }
         if self.binds_all_invalid() {
             d::reset_binds(self);
@@ -612,6 +719,18 @@ mod tests {
         assert_eq!(locate_write(0xFFFF_FFFF, 2), None);
         assert_eq!(locate_read(0x8007_8000, 4), None);
         assert_eq!(locate_read(0x8007_0790, 4), Some((Bank::Global, 0x790)));
+    }
+
+    #[test]
+    fn layered_access() {
+        let mut p = Profile::zeroed();
+        p.set_key_map_fn(3, 319);
+        p.set_hold_code(1, 4, -7);
+        p.set_mod_mask(0, 5, 0x22);
+        assert_eq!((p.code(0, 3), p.code(1, 3)), (0, 319));
+        assert_eq!(rd_u16(&p.0, b2::HOLD_CODE_FN + 8) as i16, -7);
+        assert_eq!(p.0[b2::MOD_MASK + 5], 0x22);
+        assert_eq!((p.hold_code(1, 4), p.mod_mask(0, 5)), (-7, 0x22));
     }
 
     #[test]

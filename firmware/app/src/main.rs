@@ -116,7 +116,7 @@ async fn health_task() {
             // BE FD tail: scans/s, engine busy per mille, uptime (stock words 499-504)
             let cyc = scan::SEC_CYC.swap(0, Ordering::Relaxed);
             let busy = (cyc / (cpu_mhz * 1000).max(1)).min(1000) as u16;
-            with_kb(|kb| kb.engine.second_tick(busy));
+            with_kb(|kb| kb.second_tick(busy));
         }
         if tick % 20 != 0 {
             continue;
@@ -159,8 +159,7 @@ async fn health_task() {
 #[inline(never)]
 fn boot_keyboard(uid: [u8; 16]) {
     shared::kb_boot(|kb| {
-        kb.set_serial(uid);
-        kb.boot(&mut *STORAGE.borrow_mut());
+        kb.boot(uid, &mut *STORAGE.borrow_mut());
         log!(
             "config: active profile {}, defaults written for empty slots: {}",
             kb.active_profile(),

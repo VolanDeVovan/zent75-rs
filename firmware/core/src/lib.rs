@@ -9,6 +9,7 @@ pub mod defaults;
 pub mod device;
 pub mod engine;
 pub mod hid;
+pub mod keycode;
 pub mod keys;
 pub mod lighting;
 pub mod storage;

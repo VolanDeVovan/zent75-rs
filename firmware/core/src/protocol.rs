@@ -36,11 +36,11 @@ pub mod cmd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request<'a> {
     Heartbeat,
-    /// `BE 01`: the stock firmware hangs on it. We answer like a RAM read (safe), see device.rs.
-    ReadFlash { addr: u32, n: u16 },
     Save,
     WriteRam { addr: u32, data: &'a [u8] },
-    ReadRam { addr: u32, n: u16 },
+    /// `BE 04` ([`cmd::READ_RAM`]) or `BE 01` ([`cmd::READ_FLASH`]); the reply echoes `cmd`.
+    /// The stock firmware hangs on `BE 01`; ours answers both from the RAM shadows.
+    Read { cmd: u8, addr: u32, n: u16 },
     Serial,
     SwitchProfile(u8),
     Diag(u8),
@@ -88,8 +88,12 @@ pub fn parse(report: &[u8]) -> Result<Request<'_>, FrameError> {
         return Err(FrameError::BadEof);
     }
     let c = r[1];
-    let arg = |want: usize| -> Result<u8, FrameError> {
-        if len == want { Ok(r[4]) } else { Err(FrameError::BadLen) }
+    // argument-less commands are exactly 5 bytes, one-argument commands 6 (stock ignores others)
+    let bare = |req: Request<'static>| -> Result<Request<'static>, FrameError> {
+        if len == 5 { Ok(req) } else { Err(FrameError::BadLen) }
+    };
+    let arg = || -> Result<u8, FrameError> {
+        if len == 6 { Ok(r[4]) } else { Err(FrameError::BadLen) }
     };
     let addr_n = || -> Result<(u32, u16), FrameError> {
         if len < 11 {
@@ -101,21 +105,21 @@ pub fn parse(report: &[u8]) -> Result<Request<'_>, FrameError> {
         ))
     };
     Ok(match c {
-        cmd::HEARTBEAT => Request::Heartbeat,
-        cmd::SAVE => Request::Save,
-        cmd::SERIAL => Request::Serial,
-        cmd::RESET_CONFIG => Request::ResetConfig,
-        cmd::BOOTLOADER => Request::Bootloader,
-        cmd::REBOOT => Request::Reboot,
-        cmd::SWITCH_PROFILE => Request::SwitchProfile(arg(6)?),
-        cmd::DIAG => Request::Diag(arg(6)?),
-        cmd::CALIBRATION => Request::Calibration(arg(6)? != 0),
+        cmd::HEARTBEAT => bare(Request::Heartbeat)?,
+        cmd::SAVE => bare(Request::Save)?,
+        cmd::SERIAL => bare(Request::Serial)?,
+        cmd::RESET_CONFIG => bare(Request::ResetConfig)?,
+        cmd::BOOTLOADER => bare(Request::Bootloader)?,
+        cmd::REBOOT => bare(Request::Reboot)?,
+        cmd::SWITCH_PROFILE => Request::SwitchProfile(arg()?),
+        cmd::DIAG => Request::Diag(arg()?),
+        cmd::CALIBRATION => Request::Calibration(arg()? != 0),
         cmd::READ_RAM | cmd::READ_FLASH => {
             let (addr, n) = addr_n()?;
             if n as usize > MAX_RW || n == 0 {
                 return Err(FrameError::TooLong);
             }
-            if c == cmd::READ_RAM { Request::ReadRam { addr, n } } else { Request::ReadFlash { addr, n } }
+            Request::Read { cmd: c, addr, n }
         }
         cmd::WRITE_RAM => {
             let (addr, n) = addr_n()?;
@@ -269,7 +273,7 @@ mod tests {
     #[test]
     fn read_and_reply() {
         let f = host::read(cmd::READ_RAM, 0x8007_0210, 4);
-        assert_eq!(parse(&f), Ok(Request::ReadRam { addr: 0x8007_0210, n: 4 }));
+        assert_eq!(parse(&f), Ok(Request::Read { cmd: cmd::READ_RAM, addr: 0x8007_0210, n: 4 }));
         let mut out = [0u8; REPORT_SIZE];
         let len = Reply::new(&mut out).data(cmd::READ_RAM, 0x8007_0210, 4, |d| d.copy_from_slice(&[18, 0, 0, 0]));
         assert_eq!(len, 17);

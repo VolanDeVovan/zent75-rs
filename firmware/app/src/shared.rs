@@ -31,7 +31,7 @@ struct KbCell(UnsafeCell<Keyboard>);
 unsafe impl Sync for KbCell {}
 /// Initialised at link time (`Keyboard::new` is `const`): the ~40 KB struct is copied into DLM
 /// by the startup code with `.data` and is never built on the 16 KB stack.
-static KB: KbCell = KbCell(UnsafeCell::new(Keyboard::new([0; 16])));
+static KB: KbCell = KbCell(UnsafeCell::new(Keyboard::new()));
 
 /// Set up the keyboard (serial, config banks). Call once, before the scan interrupt is
 /// enabled — nothing else touches `KB` yet, so no lock is needed.

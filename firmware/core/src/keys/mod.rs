@@ -11,11 +11,12 @@
 
 mod object;
 
-use crate::config::{Global, Profile};
+use crate::config::{Profile, LAYERS};
 use crate::engine::compat::{guard_for, Compat, GUARDS_DKS, GUARDS_RT, GUARDS_304, GUARD_DEFAULT};
 use crate::engine::tables::{MOD_FLAG_CODES, OBJ_TO_SLOT, SLOT_TO_OBJ};
 use crate::engine::{Engine, KeyPass};
-use crate::hid::{HidState, KeyboardState};
+use crate::hid::HidReports;
+use crate::keycode::{self as kc, func};
 use crate::layout::{KEY_COUNT, SLOT_COUNT, STEP_COUNT};
 use object::{Bind, Handler, Obj};
 
@@ -23,10 +24,6 @@ pub use object::Obj as KeyObject;
 
 /// Key objects (83 keys + 5 spare slots, like stock).
 pub const OBJ_COUNT: usize = SLOT_COUNT;
-/// Keymap value meaning "empty".
-pub const KC_NONE: i16 = 1000;
-/// Fn layer key.
-pub const KC_FN: i16 = 401;
 /// Profile-switch cool-down (0.9 s): no report is rebuilt meanwhile (stock `0x9214C`).
 pub const SWITCH_COOLDOWN: i32 = 7200;
 /// Fn + Esc held this many scans (5 s) triggers the hard reset.
@@ -36,35 +33,6 @@ pub const TAP_HOLD_SCANS: u16 = 4000;
 /// More keys than this in the pressed list: empty reports until ≤ [`ROLLOVER_RESUME`].
 pub const ROLLOVER_LIMIT: usize = 20;
 pub const ROLLOVER_RESUME: usize = 4;
-
-/// Bank-2 offsets read by the key pipeline (88-entry arrays, index = key).
-mod b2 {
-    pub const HOLD: [usize; 2] = [0x000, 0x0B0];
-    pub const KEY_MAP: [usize; 2] = [0x160, 0x210];
-    pub const PRESS_TH: usize = 0x2C0;
-    pub const RETURN_TH: usize = 0x370;
-    pub const PRESS_DZ: usize = 0x420;
-    pub const RETURN_DZ: usize = 0x4D0;
-    pub const NORM_PRESS: usize = 0x580;
-    pub const NORM_RETURN: usize = 0x630;
-    pub const KEY_MODE: usize = 0x6E0;
-    pub const MASK: [usize; 2] = [0x790, 0x7E8];
-    pub const CANCEL: usize = 0xA50;
-    pub const BIND: usize = 0xD00;
-    pub const BIND_MODE: usize = 0x1DE0;
-}
-
-#[inline]
-fn rd16(p: &Profile, off: usize) -> u16 {
-    match p.0.get(off..off + 2) {
-        Some(s) => u16::from_le_bytes([s[0], s[1]]),
-        None => 0,
-    }
-}
-#[inline]
-fn rd8(p: &Profile, off: usize) -> u8 {
-    p.0.get(off).copied().unwrap_or(0)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightCmd {
@@ -83,15 +51,13 @@ pub enum Event {
     Bootloader,
     /// 302: watchdog reboot.
     Reboot,
-    /// Fn + Esc held 5 s. Stock erases both config banks including the calibration; ours must
-    /// keep `top/bot` and the switch types (`compat::HARD_RESET_KEEPS_CALIBRATION`).
+    /// Fn + Esc held 5 s. Stock erases both config banks including the calibration; ours
+    /// keeps `top/bot` and the switch types (`Keyboard::wipe`).
     FactoryReset,
     /// 305 `INITSET`: reset the active profile to its defaults and save it (repeats while held).
     ResetProfile,
     /// 307–310: switch profile (the key layer already applied the 0.9 s cool-down).
     SwitchProfile(u8),
-    ProfileChanged,
-    ConfigChanged,
     /// 311–315, 317, 318.
     Lighting(LightCmd),
     /// 316 toggled WinLock (new state).
@@ -166,16 +132,15 @@ pub struct KeyProcessor {
     last_cmp: [u8; 16],
     last_cons: u32,
     last_mouse: u32,
-    host_kb: [u8; 16],
-    host_cons: [u8; 3],
-    host_mouse: u8,
+    /// The reports as last "sent" (what the host has) and a counter of those sends.
+    hid: HidReports,
+    hid_gen: u32,
     lock: bool,
     lockcnt: u32,
     cooldown: i32,
     win_lock: bool,
     seed: u16,
     fn_esc: u32,
-    hid: HidState,
     /// Per-scan send log (host builds only: tests, simulator).
     #[cfg(feature = "std")]
     sent: [Sent; SENT_CAP],
@@ -217,22 +182,14 @@ impl KeyProcessor {
             last_cmp: [0xFF; 16],
             last_cons: u32::MAX,
             last_mouse: u32::MAX,
-            host_kb: [0; 16],
-            host_cons: [0; 3],
-            host_mouse: 0,
+            hid: HidReports::EMPTY,
+            hid_gen: 0,
             lock: false,
             lockcnt: 0,
             cooldown: 0,
             win_lock: false,
             seed: 0,
             fn_esc: 0,
-            hid: HidState {
-                keyboard: KeyboardState { modifiers: 0, keys: [0; 32] },
-                consumer: 0,
-                consumer_bits: 0,
-                system: 0,
-                mouse_buttons: 0,
-            },
             #[cfg(feature = "std")]
             sent: [Sent { ep: 0, data: [0; 16], len: 0 }; SENT_CAP],
             #[cfg(feature = "std")]
@@ -245,18 +202,20 @@ impl KeyProcessor {
         self.dirty = true;
     }
 
-    /// Config changed: the objects are re-derived (stock `FUN_A6F8`, which also resets every
-    /// key state and the reports) at the next [`KeyProcessor::update`].
-    pub fn configure(&mut self, _p: &Profile) {
-        self.dirty = true;
-    }
-    /// Same as [`KeyProcessor::configure`] (profile switch).
-    pub fn reset(&mut self) {
+    /// The config changed (or the profile was switched): the objects are re-derived from it
+    /// at the next [`KeyProcessor::update`] (stock `FUN_A6F8`, which also resets every key state
+    /// and the reports).
+    pub fn invalidate(&mut self) {
         self.dirty = true;
     }
 
-    pub fn hid(&self) -> &HidState {
+    /// The reports the host currently has.
+    pub fn hid(&self) -> &HidReports {
         &self.hid
+    }
+    /// Advances whenever a report in [`KeyProcessor::hid`] was replaced.
+    pub fn hid_generation(&self) -> u32 {
+        self.hid_gen
     }
     /// Key (object) actuated (pressed state 1; a mode-2 "RT-released" key is not pressed).
     pub fn is_pressed(&self, key: usize) -> bool {
@@ -275,10 +234,6 @@ impl KeyProcessor {
     /// Start the 0.9 s profile cool-down (stock: `BE C0` does this too).
     pub fn start_cooldown(&mut self) {
         self.cooldown = SWITCH_COOLDOWN;
-    }
-    /// The stock 16-byte NKRO keyboard report as last sent.
-    pub fn keyboard_report(&self) -> [u8; 16] {
-        self.host_kb
     }
     /// Reports the stock firmware would have sent during the last scan (host builds only).
     #[cfg(feature = "std")]
@@ -308,21 +263,21 @@ impl KeyProcessor {
             let o = &mut self.objs[k];
             o.reset_state();
             o.max = max as i16;
-            let (pt, rt) = (rd16(p, b2::PRESS_TH + 2 * k), rd16(p, b2::RETURN_TH + 2 * k));
+            let (pt, rt) = (p.press_th(k), p.return_th(k));
             if pt != 0 && rt != 0 {
                 o.press_th = pt;
                 o.return_th = rt;
             }
-            let pdz = rd16(p, b2::PRESS_DZ + 2 * k);
+            let pdz = p.press_deadzone(k);
             o.top = (max as u16).wrapping_sub(pdz);
             if pdz == 0 && o.press_th < 20 {
                 o.top = o.top.wrapping_sub(10);
             }
             o.peak = o.top;
-            let rdz = rd16(p, b2::RETURN_DZ + 2 * k) as i32 + 10;
+            let rdz = p.return_deadzone(k) as i32 + 10;
             o.bot = rdz.min(max) as u16;
             o.low = o.bot;
-            let (np, nr) = (rd16(p, b2::NORM_PRESS + 2 * k), rd16(p, b2::NORM_RETURN + 2 * k));
+            let (np, nr) = (p.norm_press_th(k), p.norm_return_th(k));
             if np != 0 && nr != 0 {
                 o.p = (max as u16).wrapping_sub(np);
                 o.r = (max as u16).wrapping_sub(nr);
@@ -330,19 +285,19 @@ impl KeyProcessor {
             if o.r < o.p {
                 o.r = o.p;
             }
-            for l in 0..2 {
-                o.code[l] = rd16(p, b2::KEY_MAP[l] + 2 * k) as i16;
-                o.hold[l] = rd16(p, b2::HOLD[l] + 2 * k) as i16;
-                o.mask[l] = rd8(p, b2::MASK[l] + k);
-                self.th_flag |= o.hold[l] != KC_NONE;
+            for l in 0..LAYERS {
+                o.code[l] = p.code(l, k);
+                o.hold[l] = p.hold_code(l, k);
+                o.mask[l] = p.mod_mask(l, k);
+                self.th_flag |= o.hold[l] != kc::NONE;
                 self.mask_flag |= o.mask[l] != 0;
             }
-            let c = rd16(p, b2::CANCEL + 2 * k) as i16;
+            let c = p.cancel_code(k);
             o.cancel = c;
             o.armed = false;
             o.socd_mask = 1 << (c as i32 & 7);
             o.socd_byte = 0;
-            if c != KC_NONE {
+            if c != kc::NONE {
                 self.socd_flag = true;
                 if (1..=119).contains(&c) {
                     o.socd_byte = (c >> 3) as u8 + 1;
@@ -354,7 +309,7 @@ impl KeyProcessor {
                     self.socd_step_n[step] += 1;
                 }
             }
-            let mode = rd8(p, b2::KEY_MODE + k);
+            let mode = p.key_mode(k);
             o.key_mode = mode;
             o.handler = match mode {
                 1 => {
@@ -375,35 +330,28 @@ impl KeyProcessor {
         // key groups / DKS
         self.bind_n = 0;
         for k in 0..OBJ_COUNT {
-            let mode = rd8(p, b2::BIND_MODE + k);
+            let mode = p.bind_mode(k);
             if mode == 0 {
                 continue;
             }
-            let rec = b2::BIND + 48 * k;
+            let rec = p.bind(k);
             if mode > 2 {
                 // other values bind a handler that does nothing (stock `FUN_16494`): not listed
                 // (nothing observable, saves the step-10 work), but byte 47 still applies
-                if rd8(p, rec + 47) == 1 {
+                if rec.suppress_original() {
                     let o = &mut self.objs[k];
                     o.handler = Handler::Normal;
-                    o.code = [KC_NONE; 2];
+                    o.code = [kc::NONE; 2];
                 }
                 continue;
             }
             self.bind_objs[self.bind_n] = k as u8;
             self.bind_n += 1;
-            let r = |i: usize| rd16(p, rec + i);
             let o = &mut self.objs[k];
-            o.bind = match mode {
-                1 => Bind::Group,
-                2 => Bind::Dks,
-                _ => Bind::Inert,
-            };
+            o.bind = if mode == 1 { Bind::Group } else { Bind::Dks };
             o.dks = 0;
             o.dks_guard = [0; 4];
-            o.t_single = r(28);
-            o.t_delay = r(30);
-            o.t_rand = r(32);
+            (o.t_single, o.t_delay, o.t_rand) = rec.tap_times();
             let g = guard_for(&GUARDS_DKS, k);
             o.dks_len_thr = [g.bot_len, g.bot_thr, g.top_len, g.top_thr_for(o.max as i32)];
             for i in 0..4 {
@@ -413,16 +361,16 @@ impl KeyProcessor {
                 o.out[i] = 0;
                 o.raw[i] = 0;
                 o.linger[i] = 0;
-                o.scode[i] = r(16 + 2 * i) as i16;
+                o.scode[i] = rec.code(i);
                 for ph in 0..4 {
-                    o.action[i][ph] = rd8(p, rec + 4 * i + ph);
+                    o.action[i][ph] = rec.action(i, ph);
                 }
             }
-            o.bp = (o.max as u16).wrapping_sub(r(26));
-            o.tp = (o.max as u16).wrapping_sub(r(24));
-            if rd8(p, rec + 47) == 1 {
+            o.bp = (o.max as u16).wrapping_sub(rec.bottom_point());
+            o.tp = (o.max as u16).wrapping_sub(rec.top_point());
+            if rec.suppress_original() {
                 o.handler = Handler::Normal;
-                o.code = [KC_NONE; 2];
+                o.code = [kc::NONE; 2];
             }
         }
         self.report = [0; 16];
@@ -441,7 +389,7 @@ impl KeyProcessor {
     // ------------------------------------------------------------------ scan
 
     /// Run the key pipeline for the scan the engine just processed.
-    pub fn update(&mut self, e: &Engine, p: &Profile, _g: &Global) -> Events {
+    pub fn update(&mut self, e: &Engine, p: &Profile) -> Events {
         let mut ev = Events::default();
         if self.dirty {
             self.apply(p, e);
@@ -478,7 +426,6 @@ impl KeyProcessor {
             }
             self.fn_esc = if self.flags[0] && self.objs[0].pressed == 1 { self.fn_esc + 1 } else { 0 };
         }
-        self.publish();
         ev
     }
 
@@ -503,12 +450,12 @@ impl KeyProcessor {
                 let o = &mut self.objs[k as usize];
                 let h = o.hold[layer];
                 if o.pressed == 1 {
-                    if h != KC_NONE {
+                    if h != kc::NONE {
                         o.hold_cnt = o.hold_cnt.saturating_add(1);
                         o.th = if o.hold_cnt > TAP_HOLD_SCANS { 2 } else { 1 };
                     }
                 } else {
-                    o.th = if h != KC_NONE && o.th == 1 { 3 } else { 0 };
+                    o.th = if h != kc::NONE && o.th == 1 { 3 } else { 0 };
                     o.hold_cnt = 0;
                 }
             }
@@ -516,7 +463,7 @@ impl KeyProcessor {
         if self.socd_flag {
             for i in 0..self.socd_step_n[step] as usize {
                 let o = &mut self.objs[self.socd_step[step][i] as usize];
-                if o.cancel == KC_NONE {
+                if o.cancel == kc::NONE {
                     continue;
                 }
                 let b = o.socd_byte as usize;
@@ -627,21 +574,21 @@ impl KeyProcessor {
                 self.lockcnt = 44000;
                 self.report = [0; 16];
             }
-            self.host_kb = self.report;
             self.last_cmp = self.report;
-            self.log(0x81, &self.report.clone());
+            self.hid.keyboard = self.report;
+            self.send(0x81, &self.report.clone());
         }
         let cons = (self.cons[0] as u32) << 16 | (self.cons[1] as u32) << 8 | self.cons[2] as u32;
         if cons != self.last_cons {
             self.last_cons = cons;
-            self.host_cons = self.cons;
-            self.log(0x83, &self.cons.clone());
+            self.hid.consumer = self.cons;
+            self.send(0x83, &self.cons.clone());
         }
         let mouse = self.mouse[0] as u32;
         if mouse != self.last_mouse {
             self.last_mouse = mouse;
-            self.host_mouse = self.mouse[0];
-            self.log(0x84, &self.mouse.clone());
+            self.hid.mouse_buttons = self.mouse[0];
+            self.send(0x84, &self.mouse.clone());
         }
     }
 
@@ -652,11 +599,11 @@ impl KeyProcessor {
         }
     }
 
-    #[cfg(not(feature = "std"))]
-    fn log(&mut self, _ep: u8, _d: &[u8]) {}
-
-    #[cfg(feature = "std")]
-    fn log(&mut self, ep: u8, d: &[u8]) {
+    /// A report went out on endpoint `ep` (stock: queued for USB).
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))]
+    fn send(&mut self, ep: u8, d: &[u8]) {
+        self.hid_gen = self.hid_gen.wrapping_add(1);
+        #[cfg(feature = "std")]
         if self.sent_n < SENT_CAP {
             let mut data = [0; 16];
             data[..d.len()].copy_from_slice(d);
@@ -672,11 +619,11 @@ impl KeyProcessor {
         self.mouse = [0; 3];
         self.flags = [false; 12];
         if self.pn >= 1 {
-            self.flags[0] = self.plist[..self.pn].iter().any(|&k| self.objs[k as usize].code[0] == KC_FN);
+            self.flags[0] = self.plist[..self.pn].iter().any(|&k| self.objs[k as usize].code[0] == kc::FN);
             let l = self.flags[0] as usize;
             for i in 0..self.pn {
                 let o = &self.objs[self.plist[i] as usize];
-                if o.code[0] != KC_FN {
+                if o.code[0] != kc::FN {
                     let c = o.code[l];
                     for (j, &m) in MOD_FLAG_CODES.iter().enumerate().skip(1) {
                         if m == c {
@@ -741,37 +688,37 @@ impl KeyProcessor {
 
     /// Stock `FUN_C698(code, obj)`: put one code into the reports or run its function.
     fn emit(&mut self, code: i16, k: usize, ev: &mut Events) {
-        let c = code as i32;
-        match c {
-            201..=224 => {
-                let n = (c - 201) as usize;
+        match code {
+            kc::CONSUMER_FIRST..=kc::CONSUMER_LAST => {
+                let n = (code - kc::CONSUMER_FIRST) as usize;
                 self.cons[n >> 3] |= 1 << (n & 7);
             }
             121..=200 => {} // stock writes below the consumer report
-            251..=255 => self.mouse[0] |= 1 << (c - 251),
-            301..=400 => self.function(c, k, ev),
-            401.. => {}
-            ..=0 => self.report[0] |= 1 << (c & 7),
+            kc::MOUSE_FIRST..=kc::MOUSE_LAST => self.mouse[0] |= 1 << (code - kc::MOUSE_FIRST),
+            func::FIRST..=func::LAST => self.function(code, k, ev),
+            kc::FN.. => {}
+            ..=0 => self.report[0] |= 1 << (code & 7),
             _ => {
-                let i = (c >> 3) as usize + 1;
+                // usages past 119 have no bit in the 16-byte report (225–250, 256–300 too)
+                let i = (code >> 3) as usize + 1;
                 if i < 16 {
-                    self.report[i] |= 1 << (c & 7);
+                    self.report[i] |= 1 << (code & 7);
                 }
             }
         }
     }
 
-    fn function(&mut self, c: i32, k: usize, ev: &mut Events) {
+    fn function(&mut self, c: i16, k: usize, ev: &mut Events) {
         let edge = self.objs[k].edge_p;
         match c {
-            301 => ev.push(Event::Bootloader),
-            302 => ev.push(Event::Reboot),
-            303 => {
+            func::BOOTLOADER => ev.push(Event::Bootloader),
+            func::REBOOT => ev.push(Event::Reboot),
+            func::RT_OFF => {
                 for o in self.objs.iter_mut() {
                     o.handler = Handler::Normal;
                 }
             }
-            304 => {
+            func::RT_ON => {
                 // handlers from key_mode again; no `return_th` gate, ignores DKS byte 47
                 for (i, o) in self.objs.iter_mut().enumerate() {
                     o.handler = match o.key_mode {
@@ -785,8 +732,8 @@ impl KeyProcessor {
                     };
                 }
             }
-            305 => ev.push(Event::ResetProfile),
-            306 => {
+            func::RESET_PROFILE => ev.push(Event::ResetProfile),
+            func::GRAVE_ESC => {
                 if !self.flags[2] && !self.flags[6] {
                     self.report[6] |= 2; // Esc
                 } else {
@@ -799,30 +746,28 @@ impl KeyProcessor {
                     self.report[7] |= 0x20; // ` ~
                 }
             }
-            307..=310 => {
+            func::PROFILE_FIRST..=func::PROFILE_LAST => {
                 if edge && self.cooldown == 0 {
                     self.cooldown = SWITCH_COOLDOWN;
-                    ev.push(Event::SwitchProfile((c - 307) as u8));
+                    ev.push(Event::SwitchProfile((c - func::PROFILE_FIRST) as u8));
                 }
             }
-            311..=318 if edge => {
-                let l = match c {
-                    311 => LightCmd::BrightnessUp,
-                    312 => LightCmd::BrightnessDown,
-                    313 => LightCmd::NextEffect,
-                    314 => LightCmd::PrevEffect,
-                    315 => LightCmd::Toggle,
-                    316 => {
-                        self.win_lock = !self.win_lock;
-                        ev.push(Event::WinLock(self.win_lock));
-                        return;
-                    }
-                    317 => LightCmd::SpeedUp,
-                    _ => LightCmd::SpeedDown,
-                };
-                ev.push(Event::Lighting(l));
+            func::WIN_LOCK if edge => {
+                self.win_lock = !self.win_lock;
+                ev.push(Event::WinLock(self.win_lock));
             }
-            320 if edge => {
+            func::BRIGHTNESS_UP..=func::SPEED_DOWN if edge => {
+                ev.push(Event::Lighting(match c {
+                    func::BRIGHTNESS_UP => LightCmd::BrightnessUp,
+                    func::BRIGHTNESS_DOWN => LightCmd::BrightnessDown,
+                    func::NEXT_EFFECT => LightCmd::NextEffect,
+                    func::PREV_EFFECT => LightCmd::PrevEffect,
+                    func::LIGHT_TOGGLE => LightCmd::Toggle,
+                    func::SPEED_UP => LightCmd::SpeedUp,
+                    _ => LightCmd::SpeedDown,
+                }));
+            }
+            func::SWAP_WASD if edge => {
                 for o in self.objs.iter_mut() {
                     o.code[0] = match o.code[0] {
                         4 => 80,
@@ -841,23 +786,8 @@ impl KeyProcessor {
         }
     }
 
-    fn publish(&mut self) {
-        let h = &mut self.hid;
-        h.keyboard = KeyboardState::from_nkro(&self.host_kb);
-        h.consumer_bits = (self.host_cons[0] as u32) | (self.host_cons[1] as u32) << 8 | (self.host_cons[2] as u32) << 16;
-        h.consumer = (0..24).find(|&n| h.consumer_bits & (1 << n) != 0).map(|n| CONSUMER_USAGES[n]).unwrap_or(0);
-        h.mouse_buttons = self.host_mouse;
-    }
-
     /// Keys 0..[`KEY_COUNT`] currently actuated.
     pub fn pressed_keys(&self) -> impl Iterator<Item = usize> + '_ {
         (0..KEY_COUNT).filter(|&k| self.objs[k].pressed == 1)
     }
 }
-
-/// Consumer usage of bit n of the 3-byte consumer report (codes 201 + n; stock descriptor
-/// `0x80040A1C`).
-pub const CONSUMER_USAGES: [u16; 24] = [
-    0xE9, 0xEA, 0xE2, 0xCD, 0xB7, 0xB6, 0xB5, 0x192, 0x18A, 0x194, 0x221, 0x223, 0x224, 0x226, 0x225, 0x227, 0x22A,
-    0x19F, 0x183, 0x6F, 0x70, 0x2A0, 0x29F, 0x1CB,
-];

@@ -37,7 +37,7 @@ zent-sim: hidraw /dev/hidraw9
 | `--slew MM_PER_S` | key travel speed (default 200 mm/s ≈ 17 ms rest → bottom; 0 = instant) |
 | `--seed N` | per-key rest/bottom variation |
 | `--no-uhid` | no virtual device, control socket only |
-| `--hid-keyboard` | also create a keyboard/consumer/system/mouse device that **types into your desktop session**. Off by default; without it HID state changes are only logged (`zent-sim: hid mods=.. keys=..`) |
+| `--hid-keyboard` | also create a keyboard/consumer/mouse device that **types into your desktop session**. Off by default; without it HID state changes are only logged (`zent-sim: hid mods=.. keys=..`) |
 | `--sudo-chmod` | `sudo -n chmod 0666` the hidraw node when it appears (see permissions) |
 | `--bootloader-ms N` | how long the device stays away after `BE FC` (default 2000) |
 | `--verbose` | log every vendor request |

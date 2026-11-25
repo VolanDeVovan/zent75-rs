@@ -94,7 +94,7 @@ pub fn load_backup(path: &Path, st: &mut impl Storage) -> Result<Summary, String
         defaults::profile(&mut prof, p);
         for (name, v) in regs {
             let (addr, data) = region(v).map_err(|e| format!("{name}: {e}"))?;
-            match config::locate(addr, data.len()) {
+            match config::locate_read(addr, data.len()) {
                 Some((Bank::Profile, off)) if off + data.len() <= BANK2_SIZE => {
                     prof.0[off..off + data.len()].copy_from_slice(&data);
                     sum.regions += 1;

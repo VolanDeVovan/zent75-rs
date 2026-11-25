@@ -30,9 +30,10 @@ mod effects;
 pub mod geometry;
 pub mod math;
 
-use crate::config::{b2, Global, Profile, KC_NONE};
+use crate::config::{Global, Profile};
 use crate::engine::Engine;
 use crate::hid::host_led;
+use crate::keycode as kc;
 use crate::keys::{KeyProcessor, LightCmd};
 use crate::layout::{KEY_COUNT, LED_COUNT, LED_TO_KEY, SCAN_HZ};
 use geometry::{MATRIX, MATRIX_COLS, MATRIX_ROWS, NO_LED, POINTS};
@@ -50,11 +51,6 @@ pub const BLINK_HALF_TICKS: i32 = 200;
 pub const PREVIEW_TIMEOUT_TICKS: u32 = 3 * TICK_HZ;
 /// Blink colour per profile (stock tables `0x80040440/30/20`).
 pub const PROFILE_BLINK: [[u8; 3]; 4] = [[60, 60, 60], [60, 0, 0], [0, 60, 0], [60, 30, 0]];
-/// Keycode of Fn (layer key) and Caps Lock / Windows keys for the indicators.
-const KC_FN: i16 = 401;
-const KC_CAPS: i16 = 57;
-const KC_LWIN: i16 = -5;
-const KC_RWIN: i16 = -1;
 
 pub type Rgb = [u8; 3];
 
@@ -210,7 +206,7 @@ impl Lighting {
     pub fn configure(&mut self, p: &mut Profile) {
         let v = p.clamp_brightness();
         let c = p.rgb_config();
-        self.p = Params { mode: c[0], h: c[1], s: c[2], v, speed: c[4], flags: p.0[b2::RGB_FLAGS] };
+        self.p = Params { mode: c[0], h: c[1], s: c[2], v, speed: c[4], flags: p.rgb_flags() };
         for i in 0..LED_COUNT {
             self.solid[i] = p.led_solid(i);
         }
@@ -261,19 +257,16 @@ impl Lighting {
         self.idle_scans / SCAN_HZ
     }
 
-    /// Called every scan: key presses for the reactive effects, Fn state, idle timer.
-    pub fn on_scan(&mut self, k: &KeyProcessor, p: &Profile) {
+    /// Called every scan: key presses for the reactive effects, the Fn layer as the key pipeline
+    /// resolved it (stock flag `0x91F9C`), idle timer.
+    pub fn on_scan(&mut self, k: &KeyProcessor) {
         let mut any = false;
-        let mut fn_held = false;
         for key in 0..KEY_COUNT {
             let down = k.is_pressed(key);
             self.press_key(key, down);
-            if down {
-                any = true;
-                fn_held |= p.key_map(key) == KC_FN;
-            }
+            any |= down;
         }
-        self.fn_held = fn_held;
+        self.fn_held = k.fn_layer();
         self.idle_scans = if any { 0 } else { self.idle_scans.saturating_add(1) };
     }
 
@@ -294,7 +287,7 @@ impl Lighting {
         }
     }
 
-    /// Fn state override (normally derived from the key states in [`Lighting::on_scan`]).
+    /// Fn-layer state for callers that do not run [`Lighting::on_scan`] (tests).
     pub fn set_fn_held(&mut self, on: bool) {
         self.fn_held = on;
     }
@@ -307,12 +300,12 @@ impl Lighting {
         match c {
             LightCmd::BrightnessUp => {
                 self.p.v = self.p.v.min(168) + 12;
-                p.0[b2::RGB_BRIGHTNESS] = self.p.v / 6;
+                p.set_brightness(self.p.v / 6);
                 self.refresh_statics(p);
             }
             LightCmd::BrightnessDown => {
                 self.p.v = self.p.v.max(12) - 12;
-                p.0[b2::RGB_BRIGHTNESS] = self.p.v / 6;
+                p.set_brightness(self.p.v / 6);
                 self.refresh_statics(p);
             }
             LightCmd::NextEffect => {
@@ -335,7 +328,7 @@ impl Lighting {
                 }
                 self.set_mode(e, p);
             }
-            LightCmd::Toggle => p.0[b2::RGB_ENABLE] = 1u8.wrapping_sub(p.0[b2::RGB_ENABLE]),
+            LightCmd::Toggle => p.toggle_rgb_enabled(),
             LightCmd::SpeedUp => self.p.speed = self.p.speed.min(238) + 17,
             LightCmd::SpeedDown => self.p.speed = self.p.speed.max(17) - 17,
         }
@@ -343,7 +336,7 @@ impl Lighting {
 
     fn set_mode(&mut self, e: u8, p: &mut Profile) {
         self.p.mode = (self.p.mode & 3) | (e << 2);
-        p.0[b2::RGB_MODE] = (e << 2) | (p.0[b2::RGB_MODE] & 3);
+        p.set_effect(e);
     }
 
     /// Current run-time effect id, H, S, V, speed.
@@ -357,7 +350,7 @@ impl Lighting {
     /// Starting exactly at 0 selects blend mode 1, exactly at 0x55 replace mode 2; mode 2
     /// colours are colour-corrected and scaled by the current V in place (on every write, as
     /// stock). Anything past the 340-byte area is dropped.
-    pub fn preview_write(&mut self, off: usize, data: &[u8], _p: &Profile) {
+    pub fn preview_write(&mut self, off: usize, data: &[u8]) {
         if off == 0 {
             self.preview_mode = 1;
         } else if off == LED_COUNT {
@@ -388,7 +381,7 @@ impl Lighting {
 
     /// Render one frame at `now_ms` into `out`. Call at least every 5.8 ms for stock pacing;
     /// calls closer than [`FRAME_TICKS`] re-send the previous frame.
-    pub fn render(&mut self, now_ms: u32, p: &Profile, g: &Global, k: &KeyProcessor, e: &Engine, out: &mut [Rgb; LED_COUNT]) {
+    pub fn render(&mut self, now_ms: u32, p: &Profile, g: &Global, e: &Engine, out: &mut [Rgb; LED_COUNT]) {
         match self.ms_last {
             None => self.tick = ((now_ms as u64 * TICK_HZ as u64) / 1000) as u32,
             Some(last) => {
@@ -410,7 +403,6 @@ impl Lighting {
         self.frame(t, p);
         *out = self.sent;
         self.blank_if_off(p, out);
-        let _ = k;
     }
 
     /// One frame at stock tick `tick` (tests and fixed-rate callers). Key presses are taken
@@ -458,7 +450,7 @@ impl Lighting {
     fn blank_if_off(&self, p: &Profile, out: &mut [Rgb; LED_COUNT]) {
         // stock blanks at the flush; applied to re-sent frames too (effect 0 keeps its last
         // frame otherwise — deviation, so "off"/suspend always darkens the board)
-        if p.0[b2::RGB_ENABLE] == 0 || self.usb_suspended {
+        if !p.rgb_enabled() || self.usb_suspended {
             *out = [[0; 3]; LED_COUNT];
         }
     }
@@ -514,7 +506,7 @@ impl Lighting {
         if result == Pass::Flush {
             self.stored_effect = self.p.mode >> 2;
             self.stored_enable = self.p.mode & 3;
-            if p.0[b2::RGB_ENABLE] == 0 || self.usb_suspended {
+            if !p.rgb_enabled() || self.usb_suspended {
                 self.set_all([0; 3]);
             }
             self.sent = self.leds;
@@ -642,12 +634,12 @@ impl Lighting {
                 self.leds[led] = if acc[key] { [on, 0, 0] } else { [0; 3] };
             }
         } else {
-            let fn_layer = p.0[b2::RGB_FN_ENABLE] != 0 && self.fn_held;
+            let fn_layer = p.fn_highlight() && self.fn_held;
             if fn_layer {
                 let v = self.p.v;
                 for led in 0..LED_COUNT {
                     let key = LED_TO_KEY[led] as usize;
-                    self.leds[led] = if p.key_map_fn(key) == KC_NONE { [0; 3] } else { [v, v, v] };
+                    self.leds[led] = if p.key_map_fn(key) == kc::NONE { [0; 3] } else { [v, v, v] };
                 }
             } else if self.preview_mode == 1 {
                 for led in 0..LED_COUNT {
@@ -668,17 +660,17 @@ impl Lighting {
                     }
                 }
             }
-            if p.0[b2::CAP_ENABLE] != 0 && self.host_leds & host_led::CAPS_LOCK != 0 {
+            if p.caps_indicator() && self.host_leds & host_led::CAPS_LOCK != 0 {
                 for led in 0..LED_COUNT {
-                    if p.key_map(LED_TO_KEY[led] as usize) == KC_CAPS {
+                    if p.key_map(LED_TO_KEY[led] as usize) == kc::CAPS_LOCK {
                         self.leds[led] = [255, 0, 0];
                     }
                 }
             }
-            if self.winlock && !self.fn_held && p.0[b2::WIN_LOCK_STATE] == 1 {
+            if self.winlock && !self.fn_held && p.win_lock_indicator() {
                 for led in 0..LED_COUNT {
                     let c = p.key_map(LED_TO_KEY[led] as usize);
-                    if c == KC_LWIN || c == KC_RWIN {
+                    if c == kc::LWIN || c == kc::RWIN {
                         self.leds[led] = [255, 0, 0];
                     }
                 }

@@ -1,7 +1,7 @@
 //! Engine + key pipeline wired into `Keyboard`: calibration frames, DA, Fn + Esc hard reset,
 //! WinLock indicator, `BE C0` report freeze.
 
-use zent_core::config::BANK1_SIZE;
+use zent_core::config::{BANK1_BASE, BANK1_SIZE};
 use zent_core::device::Keyboard;
 use zent_core::layout::{KEY_TO_SLOT, SLOT_COUNT};
 use zent_core::protocol::{cmd, host, REPORT_SIZE};
@@ -10,8 +10,8 @@ use zent_core::storage::{Slot, Storage};
 
 fn boot() -> (Keyboard, MemStorage) {
     let mut st = MemStorage::default();
-    let mut kb = Keyboard::new([0x11; 16]);
-    kb.boot(&mut st);
+    let mut kb = Keyboard::new();
+    kb.boot([0x11; 16], &mut st);
     (kb, st)
 }
 
@@ -28,7 +28,7 @@ fn settle(kb: &mut Keyboard) {
     for _ in 0..13000 {
         kb.scan(&s);
     }
-    assert!(kb.engine_ready());
+    assert!(kb.engine().ready());
 }
 
 #[test]
@@ -55,15 +55,15 @@ fn calibration_frames_without_heartbeat() {
     for _ in 0..100 {
         kb.scan(&s);
     }
-    assert_eq!(kb.hid().keyboard.pressed().count(), 0);
+    assert_eq!(kb.hid().pressed().count(), 0);
 }
 
 #[test]
 fn fn_esc_five_seconds_wipes_but_keeps_calibration() {
     let (mut kb, mut st) = boot();
-    kb.global.set_top_value(3, 30500);
     let mut out = [0u8; REPORT_SIZE];
-    kb.vendor_in(&host::simple(cmd::SAVE), &mut st, &mut out);
+    // top_value[3] = 30500 (a bank-1 write saves itself)
+    kb.vendor_in(&host::write(BANK1_BASE + 6, &30500u16.to_le_bytes()), &mut st, &mut out);
     settle(&mut kb);
     let s = samples(&[78, 0]); // Fn + Esc
     for _ in 0..40_100 {
@@ -86,12 +86,12 @@ fn winlock_reaches_the_lighting_and_blocks_win() {
             kb.scan(&s);
         }
     }
-    assert!(kb.lighting.winlock());
+    assert!(kb.lighting().winlock());
     let s = samples(&[74]);
     for _ in 0..100 {
         kb.scan(&s);
     }
-    assert_eq!(kb.hid().keyboard.modifiers & 0x88, 0, "LWin blocked");
+    assert_eq!(kb.hid().modifiers() & 0x88, 0, "LWin blocked");
 }
 
 #[test]
@@ -106,11 +106,11 @@ fn host_profile_switch_freezes_reports() {
         kb.service(&mut st);
     }
     // F went down during the cool-down: no rebuild then, and none after it ends (stock)
-    assert_eq!(kb.hid().keyboard.pressed().count(), 0, "frozen");
+    assert_eq!(kb.hid().pressed().count(), 0, "frozen");
     // the next change after the cool-down rebuilds the report
     let s = samples(&[49, 52]);
     for _ in 0..400 {
         kb.scan(&s);
     }
-    assert!(kb.hid().keyboard.is_pressed(9) && kb.hid().keyboard.is_pressed(13));
+    assert!(kb.hid().is_pressed(9) && kb.hid().is_pressed(13));
 }

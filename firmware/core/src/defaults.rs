@@ -5,7 +5,8 @@
 //! initialises (gaps, `C66`/`C67`, bind-record bytes 34..46, …) stay `FF` exactly as on a
 //! freshly flashed board. `tests/config.rs` compares them with the images stock produces.
 
-use crate::config::{self, b2, cs, wr_u16, wr_u32, Global, Profile, CUSTOM_SWITCH_SIZE, KC_NONE, KEY_SLOTS, NAME_SIZE};
+use crate::config::{self, b2, bind, cs, wr_u16, wr_u32, Global, Profile, CUSTOM_SWITCH_SIZE, KEY_SLOTS, LAYERS, NAME_SIZE};
+use crate::keycode::NONE as KC_NONE;
 use crate::layout::{LED_COUNT, PROFILE_COUNT};
 
 /// Stock default main layer (table `0x80040EF8`); 401 = Fn, negative = modifiers.
@@ -119,11 +120,11 @@ pub fn reset_actuation(p: &mut Profile, index: usize) {
         p.set_return_deadzone(k, 0);
         wr_u16(&mut p.0, b2::UNK_8F0 + 2 * k, 100);
         wr_u16(&mut p.0, b2::UNK_9A0 + 2 * k, 100);
-        p.set_key_mode_raw(k, 0);
+        p.set_key_mode(k, 0);
     }
     if index == 0 {
         for k in WASD {
-            p.set_key_mode_raw(k, 1);
+            p.set_key_mode(k, 1);
         }
     }
 }
@@ -134,13 +135,13 @@ pub fn reset_cancel(p: &mut Profile) {
     }
 }
 
-/// Extra layers A/B = 1000, their companion bytes 0.
-pub fn reset_layers(p: &mut Profile) {
-    p.0[b2::LAYER_A_EXT..b2::LAYER_A_EXT + KEY_SLOTS].fill(0);
-    p.0[b2::LAYER_B_EXT..b2::LAYER_B_EXT + KEY_SLOTS].fill(0);
-    for k in 0..KEY_SLOTS {
-        p.set_layer_a(k, KC_NONE);
-        p.set_layer_b(k, KC_NONE);
+/// Tap-hold off (hold codes 1000) and no modifier masks, on both layers.
+pub fn reset_tap_hold(p: &mut Profile) {
+    for layer in 0..LAYERS {
+        for k in 0..KEY_SLOTS {
+            p.set_hold_code(layer, k, KC_NONE);
+            p.set_mod_mask(layer, k, 0);
+        }
     }
 }
 
@@ -150,14 +151,20 @@ pub fn reset_binds(p: &mut Profile) {
     p.0[b2::BIND_KEY_MODE..b2::BIND_KEY_MODE + KEY_SLOTS].fill(0);
     for k in 0..KEY_SLOTS {
         let r = p.bind_record_mut(k);
-        r[..16].fill(0);
+        r[bind::ACTIONS..bind::CODES].fill(0);
         for i in 0..4 {
-            wr_u16(r, 16 + 2 * i, KC_NONE as u16);
+            wr_u16(r, bind::CODES + 2 * i, KC_NONE as u16);
         }
-        for (o, v) in [(24, 100), (26, 3000), (28, 8), (30, 24), (32, 16)] {
+        for (o, v) in [
+            (bind::TOP_POINT, 100),
+            (bind::BOTTOM_POINT, 3000),
+            (bind::TAP_SINGLE, 8),
+            (bind::TAP_DELAY, 24),
+            (bind::TAP_RANDOM, 16),
+        ] {
             wr_u16(r, o, v);
         }
-        r[47] = 1;
+        r[bind::SUPPRESS] = 1;
     }
 }
 
@@ -167,7 +174,7 @@ pub fn reset_binds(p: &mut Profile) {
 pub fn reset_profile(p: &mut Profile, index: usize) {
     reset_lighting(p);
     reset_keymaps(p);
-    reset_layers(p);
+    reset_tap_hold(p);
     reset_actuation(p, index);
     reset_cancel(p);
     reset_binds(p);

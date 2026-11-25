@@ -84,7 +84,7 @@ fn sleep_blanks_after_idle_and_a_key_wakes() {
     l.configure(&mut p);
     let keys = zent_core::keys::KeyProcessor::new();
     for _ in 0..2 * 8000 {
-        l.on_scan(&keys, &p);
+        l.on_scan(&keys);
     }
     assert_eq!(l.idle_seconds(), 2);
     assert!(frame(&mut l, &p, 0).iter().all(|c| *c == [0; 3]));

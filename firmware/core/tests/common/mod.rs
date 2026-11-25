@@ -115,7 +115,7 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
     e.set_compat(compat);
     k.set_compat(compat);
     e.configure(&fx.g, &fx.p);
-    k.configure(&fx.p);
+    k.invalidate();
     e.init_samples(&[fx.rest as u16; SLOT_COUNT]); // the harness powers up at rest
     e.skip_warmup();
     let mut cur = [fx.rest; 83];
@@ -126,7 +126,6 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
     let mut stock_all = Vec::new();
     let mut out = [0u8; REPORT_SIZE];
     let mut scan = 0usize;
-    let mut cal = false;
     for (n, kv) in &fx.segs {
         for i in 0..*n {
             for &(key, a, b) in kv {
@@ -142,14 +141,13 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
                 slots[OBJ_TO_SLOT[key] as usize] = v as u16;
             }
             if fx.cal == Some(scan) {
-                cal = true;
                 e.set_calibration(true);
             }
             if fx.diag {
                 e.set_diag(true);
             }
-            e.scan(&slots, &fx.g, &fx.p, cal);
-            let _ = k.update(&e, &fx.p, &fx.g);
+            e.scan(&slots);
+            let _ = k.update(&e, &fx.p);
             let ex = fx.exp.get(&scan);
             if let Some(ex) = ex {
                 for &(key, raw, travel, pressed) in &ex.r {
@@ -179,7 +177,7 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
             if fx.stream
                 && let Some(fw) = ex.and_then(|x| x.f.as_ref())
             {
-                let n = e.stream_frame(&mut out, fx.diag);
+                let n = e.stream_frame(&mut out);
                 assert_eq!(n, 1017);
                 let ours = words(&out, 505);
                 for (i, (a, b)) in ours.iter().zip(fw).enumerate().take(499) {

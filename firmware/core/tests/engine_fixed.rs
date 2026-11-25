@@ -4,7 +4,7 @@
 mod common;
 
 use common::{load, replay_with};
-use zent_core::config::{Global, Profile};
+use zent_core::config::Profile;
 use zent_core::engine::compat::Compat;
 use zent_core::engine::tables::OBJ_TO_SLOT;
 use zent_core::engine::{Engine, KeyPass};
@@ -89,17 +89,17 @@ fn autocal_tracks_the_measured_bottom() {
     assert!(fixed_ref < bot && (fixed_ref - 16001).abs() < 150, "fixed {fixed_ref} (stored bottom {bot})");
 }
 
-fn rig(c: Compat) -> (Engine, KeyProcessor, Global, Profile) {
+fn rig(c: Compat) -> (Engine, KeyProcessor, Profile) {
     let fx = load("press_type2");
     let mut e = Engine::new();
     let mut k = KeyProcessor::new();
     e.set_compat(c);
     k.set_compat(c);
     e.configure(&fx.g, &fx.p);
-    k.configure(&fx.p);
+    k.invalidate();
     e.init_samples(&[30000; SLOT_COUNT]);
     e.skip_warmup();
-    (e, k, fx.g, fx.p)
+    (e, k, fx.p)
 }
 
 fn slots(keys: &[(usize, u16)]) -> [u16; SLOT_COUNT] {
@@ -115,7 +115,7 @@ fn per_slot_filter_is_not_disturbed_by_neighbours() {
     // F ramps slowly while the other keys are quiet or noisy (F's crosstalk sources stay
     // constant). With one shared integrator (stock) the noise changes F's filtered trajectory.
     let run = |c: Compat, noisy: bool| {
-        let (mut e, mut k, g, p) = rig(c);
+        let (mut e, mut k, p) = rig(c);
         let mut x = 1u32;
         let mut out = Vec::new();
         let f = OBJ_TO_SLOT[49] as usize;
@@ -131,8 +131,8 @@ fn per_slot_filter_is_not_disturbed_by_neighbours() {
                 s[q] = 30000;
             }
             s[f] = if n < 1000 { 30000 } else { 30000 - ((n - 1000) / 4) as u16 };
-            e.scan(&s, &g, &p, false);
-            k.update(&e, &p, &g);
+            e.scan(&s);
+            k.update(&e, &p);
             if n >= 1000 {
                 out.push(e.raw(49));
             }
@@ -145,15 +145,15 @@ fn per_slot_filter_is_not_disturbed_by_neighbours() {
 
 /// Scans from the first moving sample to the press report.
 fn latency(c: Compat, key: usize) -> usize {
-    let (mut e, mut k, g, p) = rig(c);
+    let (mut e, mut k, p) = rig(c);
     for _ in 0..600 {
-        e.scan(&slots(&[]), &g, &p, false);
-        k.update(&e, &p, &g);
+        e.scan(&slots(&[]));
+        k.update(&e, &p);
     }
     assert_eq!(e.key_pass(), KeyPass::PerStep);
     for n in 0..100 {
-        e.scan(&slots(&[(key, 18000)]), &g, &p, false);
-        k.update(&e, &p, &g);
+        e.scan(&slots(&[(key, 18000)]));
+        k.update(&e, &p);
         if k.sent().iter().any(|s| s.ep == 0x81) {
             return n;
         }
@@ -177,14 +177,14 @@ fn run_events(p: &mut Profile, presses: &[(usize, u16)], scans: usize) -> (Vec<E
     let mut e = Engine::new();
     let mut k = KeyProcessor::new();
     e.configure(&fx.g, p);
-    k.configure(p);
+    k.invalidate();
     e.init_samples(&[30000; SLOT_COUNT]);
     e.skip_warmup();
     let mut ev = Vec::new();
     for n in 0..600 + scans {
         let s = if n < 600 { slots(&[]) } else { slots(presses) };
-        e.scan(&s, &fx.g, p, false);
-        ev.extend(k.update(&e, p, &fx.g).iter().copied());
+        e.scan(&s);
+        ev.extend(k.update(&e, p).iter().copied());
     }
     (ev, k)
 }

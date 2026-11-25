@@ -58,7 +58,7 @@ fn saves_survive_a_sim_restart() {
     r.extend_from_slice(&host::with_arg(cmd::SWITCH_PROFILE, 0));
     sim.vendor_report(&r);
     sim.tick(8); // the switch runs in service()
-    assert_eq!(sim.kb.profile.key_map(46), 5);
+    assert_eq!(sim.kb.profile().key_map(46), 5);
     assert_eq!(
         std::fs::read(d.join("profile0.bin")).unwrap().len(),
         BANK2_SIZE
@@ -84,17 +84,17 @@ fn load_backup_seeds_all_profiles() {
         sim.vendor_report(&host::with_arg(cmd::SWITCH_PROFILE, p));
         let want = std::fs::read(bk.join(format!("p{p}_key_map.bin"))).unwrap();
         assert_eq!(
-            &sim.kb.profile.0[b2::KEY_MAP..b2::KEY_MAP + 166],
+            &sim.kb.profile().0[b2::KEY_MAP..b2::KEY_MAP + 166],
             &want[..],
             "profile {p} key_map"
         );
         let want = std::fs::read(bk.join(format!("p{p}_bind_key_setting_46.bin"))).unwrap();
-        assert_eq!(&sim.kb.profile.bind_record(46)[..], &want[..]);
+        assert_eq!(&sim.kb.profile().bind_record(46)[..], &want[..]);
     }
     let top = std::fs::read(bk.join("p0_top_value.bin")).unwrap();
-    assert_eq!(&sim.kb.global.0[..166], &top[..]);
+    assert_eq!(&sim.kb.global().0[..166], &top[..]);
     let name = std::fs::read(bk.join("p0_config_name1.bin")).unwrap();
-    assert_eq!(&sim.kb.global.0[0x290..0x290 + 64], &name[..]);
+    assert_eq!(&sim.kb.global().0[0x290..0x290 + 64], &name[..]);
     drop(sim);
     std::fs::remove_dir_all(&d).unwrap();
 }
