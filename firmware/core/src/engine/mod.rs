@@ -130,6 +130,8 @@ pub struct Engine {
     dyb: [i32; N],
     hist0: [i16; N],
     vel: [i16; N],
+    /// `y − baseline` the heights were last computed for (`i32::MIN` = stale).
+    hkey: [i32; N],
     // ---- auto-calibration
     autocal: bool,
     ac_state: [u8; N],
@@ -211,6 +213,7 @@ impl Engine {
             dyb: [0; N],
             hist0: [0; N],
             vel: [0; N],
+            hkey: [i32::MIN; N],
             autocal: false,
             ac_state: [0; N],
             ac_ok: [0; N],
@@ -260,6 +263,7 @@ impl Engine {
     /// Re-derive everything that depends on the config (the engine part of stock `FUN_A6F8`):
     /// switch types, curves, `bot_eff`, span.
     pub fn configure(&mut self, g: &Global, p: &Profile) {
+        self.hkey = [i32::MIN; N];
         let mut used = [false; TYPES];
         for s in 0..N {
             let k = SLOT_TO_OBJ[s] as usize;
@@ -313,6 +317,7 @@ impl Engine {
             self.hc[s] = self.max_s[s] as i16;
         }
         self.initialized = true;
+        self.hkey = [i32::MIN; N];
     }
 
     /// Skip the 1.5 s warm-up except its last scan (tests and the stock emulator harness).
@@ -498,6 +503,13 @@ impl Engine {
         for s in r {
             let (b, y, dz, span) = (self.base[s], self.raw_s[s], self.dz[s] as i32, self.span[s]);
             self.dyb[s] = y.wrapping_sub(b);
+            if self.dyb[s] == self.hkey[s] {
+                // same inputs as last time: identical heights (saves 3 divisions + 3 lookups)
+                self.vel[s] = self.hist0[s].wrapping_sub(self.hc[s]);
+                self.hist0[s] = self.hc[s];
+                continue;
+            }
+            self.hkey[s] = self.dyb[s];
             let t = self.typ[s];
             let fa = div_rv(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000), span);
             self.ha[s] = self.curves.height(t, fa) as i16;
@@ -727,6 +739,7 @@ impl Engine {
         self.act_ref[s] += (new - self.act_ref[s]) / 2;
         self.ac_fit[s] = new as u16;
         self.span[s] = span_of(self.act_ref[s] as f32, base as f32, self.dz[s] as i32);
+        self.hkey[s] = i32::MIN;
     }
 
     // ------------------------------------------------------------------ calibration mode
