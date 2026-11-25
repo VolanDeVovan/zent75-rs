@@ -443,74 +443,65 @@ impl Engine {
         self.bookkeeping();
     }
 
+    /// One mux step: crosstalk correction, IIR filter and heights, slot by slot in slot order
+    /// (later slots see the new crosstalk deltas, the shared IIR accumulator of the stock quirk
+    /// runs in the same order).
     fn step(&mut self, step: usize, samples: &[u16; N], enabled: bool) {
-        let r = step * 8..step * 8 + 8;
-        for s in r.clone() {
-            self.raw_s[s] = samples[s] as i32;
-        }
-        if enabled {
-            // crosstalk correction, in slot order (later slots see the new deltas)
-            for s in r.clone() {
+        let first = !self.step_init[step];
+        self.step_init[step] = true;
+        for s in step * 8..step * 8 + 8 {
+            let mut x = samples[s] as i32;
+            if enabled {
                 let a = self.dlt[XT_SRC[s][0] as usize].wrapping_mul(XT_C1[s]);
                 let b = self.dlt[XT_SRC[s][1] as usize].wrapping_mul(XT_C2[s]);
                 let c = self.dlt[XT_SRC[s][2] as usize].wrapping_mul(XT_C3[s]);
                 let comp = a.wrapping_add(b).wrapping_add(c) >> 20;
-                let x = self.raw_s[s].wrapping_sub(comp);
-                self.raw_s[s] = x;
+                x = x.wrapping_sub(comp);
                 self.dlt[s] = x.wrapping_sub(self.base[s]);
             }
-        }
-        if !self.step_init[step] {
-            self.step_init[step] = true;
-            for s in r.clone() {
-                self.y[s] = self.raw_s[s];
+            let y = if first { x } else { self.iir(s, x) };
+            self.y[s] = y;
+            self.raw_s[s] = y;
+            if enabled {
+                self.heights(s, y);
             }
-        } else {
-            for s in r.clone() {
-                self.iir(s);
-            }
-        }
-        for s in r.clone() {
-            self.raw_s[s] = self.y[s];
-        }
-        if !enabled {
-            return;
-        }
-        for s in r {
-            let (b, y, dz, span) = (self.base[s], self.raw_s[s], self.dz[s] as i32, self.span[s]);
-            let dyb = y.wrapping_sub(b);
-            self.dyb[s] = dyb;
-            if dyb == self.hkey[s] {
-                // same inputs as last time: identical heights (saves 3 divisions + 3 lookups)
-                self.vel[s] = self.hist0[s].wrapping_sub(self.hc[s]);
-                self.hist0[s] = self.hc[s];
-                continue;
-            }
-            self.hkey[s] = dyb;
-            let curve = self.curves.curve(self.typ[s]);
-            let fa = span.div(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000));
-            let fb = span.div(dz.wrapping_sub(dyb).wrapping_mul(0x10000));
-            let fc = span.div(dyb.wrapping_mul(-0x10000));
-            let hc = curve.height(fc) as i16;
-            self.ha[s] = curve.height(fa) as i16;
-            self.hb[s] = curve.height(fb) as i16;
-            self.vel[s] = self.hist0[s].wrapping_sub(hc);
-            self.hist0[s] = hc;
-            self.hc[s] = hc;
         }
     }
 
-    /// Stock `FUN_13672`.
-    #[inline]
-    fn iir(&mut self, s: usize) {
-        let x = self.raw_s[s];
+    /// Curve heights of slot `s` for the filtered value `y`.
+    #[inline(always)]
+    fn heights(&mut self, s: usize, y: i32) {
+        let (b, dz, span) = (self.base[s], self.dz[s] as i32, self.span[s]);
+        let dyb = y.wrapping_sub(b);
+        self.dyb[s] = dyb;
+        if dyb == self.hkey[s] {
+            // same inputs as last time: identical heights (saves 3 divisions + 3 lookups)
+            self.vel[s] = self.hist0[s].wrapping_sub(self.hc[s]);
+            self.hist0[s] = self.hc[s];
+            return;
+        }
+        self.hkey[s] = dyb;
+        let curve = self.curves.curve(self.typ[s]);
+        let fa = span.div(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000));
+        let fb = span.div(dz.wrapping_sub(dyb).wrapping_mul(0x10000));
+        let fc = span.div(dyb.wrapping_mul(-0x10000));
+        let hc = curve.height(fc) as i16;
+        self.ha[s] = curve.height(fa) as i16;
+        self.hb[s] = curve.height(fb) as i16;
+        self.vel[s] = self.hist0[s].wrapping_sub(hc);
+        self.hist0[s] = hc;
+        self.hc[s] = hc;
+    }
+
+    /// Stock `FUN_13672`: filter input `x` of slot `s`, returns the new output.
+    #[inline(always)]
+    fn iir(&mut self, s: usize, x: i32) -> i32 {
         let yp = self.y[s];
         let d = x.wrapping_sub(yp);
         if d.unsigned_abs() > IIR_BYPASS as u32 {
             let v = d.wrapping_shl(15);
             self.st[s] = v;
-            self.y[s] = (v >> 15).wrapping_add(yp);
-            return;
+            return (v >> 15).wrapping_add(yp);
         }
         let ai = if self.compat.shared_iir_acc { 0 } else { s };
         let g = iir_step(d).wrapping_shl(15);
@@ -518,7 +509,7 @@ impl Engine {
         self.acc[ai] = a;
         let v = g.wrapping_sub(a);
         self.st[s] = v;
-        self.y[s] = (v >> 15).wrapping_add(yp);
+        (v >> 15).wrapping_add(yp)
     }
 
     /// Step-10 bookkeeping: window, capture, activity, rest tracker, auto-cal, DA.
