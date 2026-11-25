@@ -134,23 +134,43 @@ def demangle(names: list[str]) -> dict[str, str]:
     return res
 
 
+#: Factory images of the stock firmware (what it writes on blank NOR); the core's config tests
+#: compare against the same files.
+FACTORY_DIR = os.path.join(ROOT, "firmware", "core", "tests", "fixtures", "config")
+
+
 def config_banks_from_backup(path: str) -> list[tuple[int, bytes]]:
     """(flash address, bytes) writes reconstructing the config banks from a dump_all.py backup.
 
     The protocol addresses are flash-layout addresses: 0x8007xxxx is bank 1 (board-global, 1:1
     image), 0x8008xxxx is the active profile, stored for profile k at 0x80080000 + k*0x2000.
-    Bytes not covered by any dumped region stay erased (0xFF)."""
+
+    A backup holds only the regions of tools/rammap.py. Every bank therefore starts from the
+    stock factory image and the dumped regions are laid over it, which is what the bank looks
+    like on the real board (stock initialises the other fields on first boot and never changes
+    them). Leaving them erased would e.g. arm tap-hold with code 0xFFFF on every key."""
     d = json.load(open(os.path.join(path, "dump.json")))
     active = int(d.get("active_profile", 0))
-    writes = []
     profiles = d.get("profiles", {})
+
+    def factory(name: str) -> bytearray:
+        with open(os.path.join(FACTORY_DIR, name), "rb") as f:
+            return bytearray(f.read())
+
+    bank1 = factory("bank1.bin")
+    banks = {int(k): factory(f"profile{int(k)}.bin") for k in profiles}
     for key, regions in profiles.items():
         k = int(key)
-        for name, r in regions.items():
+        for r in regions.values():
             addr, data = int(r["addr"]), bytes.fromhex(r["data"])
             if BANK1 <= addr < PROFILE_BASE:
-                if k == active:
-                    writes.append((addr, data))
+                bank, off = (bank1 if k == active else None), addr - BANK1
             elif PROFILE_BASE <= addr < PROFILE_BASE + PROFILE_STRIDE:
-                writes.append((addr + k * PROFILE_STRIDE, data))
+                bank, off = banks[k], addr - PROFILE_BASE
+            else:
+                continue
+            if bank is not None and off + len(data) <= len(bank):
+                bank[off:off + len(data)] = data
+    writes = [(BANK1, bytes(bank1))]
+    writes += [(PROFILE_BASE + k * PROFILE_STRIDE, bytes(b)) for k, b in sorted(banks.items())]
     return writes

@@ -68,8 +68,9 @@ GPIO level changes and peripheral activity (ADC sequences, PWM periods, timer re
 - **Boot like stage-0**: the ELF's `PT_LOAD` segments go to their load (flash) addresses — the
   same bytes the UF2 carries — or the UF2 blocks via `tools/uf2.py`. `0x80000000..0x8003FFFF` is
   filled with the pattern `5a a5 b0 07`, the rest of flash is erased (`0xFF`), config banks are
-  optionally preloaded (bank 1 at `0x80070000` from the active profile, profile k at
-  `0x80080000 + k·0x2000`). Start at `0x80040004`.
+  optionally preloaded from a backup: every bank starts as the stock factory image
+  (`firmware/core/tests/fixtures/config/`) with the dumped regions laid over it — bank 1 at
+  `0x80070000` from the active profile, profile k at `0x80080000 + k·0x2000`. Start at `0x80040004`.
 - **CPU state at entry** (assumed; the stage-0 binary is not in the repo, TinyUF2's
   `board_app_jump` disables IRQs and both L1 caches): M-mode, `mstatus = MPP=M` (MIE=0, FS off),
   `mie = 0`, `mcache_ctl = 0`, `mmisc_ctl = 0`, `mtvec` → a sentinel that fails if a trap
@@ -136,4 +137,5 @@ for interrupts, `self.m.fail/warn/event` for findings, `self.m.time_poll()` in t
 - GPTMR clock assumed 24 MHz, EWDG bus clock 160 MHz.
 - Pin mux checks `FUNC_CTL` only (no `PAD_CTL`); the expected table only covers pads the stock
   firmware uses.
-- Config preload restores only the regions in `dump.json`; uncovered bytes stay `0xFF`.
+- Config preload: bytes no `dump.json` region covers come from the factory image, not from the
+  unit.
