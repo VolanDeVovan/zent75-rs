@@ -140,7 +140,7 @@ export const devicePage: Page = {
     return h("div", { class: "page narrow" },
       h("div", { class: "grid two" },
         card("Settings",
-          row("Sleep after", sleep, "lighting off when idle"),
+          row("Sleep after", sleep, "idle time before the keyboard sleeps"),
           row("Win key lock", toggle("dev-winlock", cfg.winLock, (v) => void app.edit("Win lock", (c) => { c.winLock = v; }), "Win key lock"), "also toggled by the WinLock key"),
           help(`These belong to profile ${s.activeProfile + 1}. Rename, switch or reset profiles from the top bar. Automatic calibration is under Sensors.`),
         ),

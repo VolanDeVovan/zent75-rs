@@ -1,11 +1,11 @@
 /** Home: the state of the keyboard at a glance and the three things that change most often. */
 import { KEY_MODE_NORMAL, KEY_MODE_RAPID_TRIGGER } from "../../protocol/keyboard";
 import { EFFECTS, switchType } from "../../protocol/keycodes";
-import { KEY_LAYOUT, primaryLedOfKey } from "../../protocol/layout";
+import { KEY_LAYOUT } from "../../protocol/layout";
 import type { Page } from "../app";
 import { cardWith, help, row, segmented, slider, toggle } from "../components";
 import { FACTORY_FEEL, FACTORY_LIGHTING } from "../defaults";
-import { h, mm, plural, rgbToHex } from "../dom";
+import { h, mm, plural } from "../dom";
 import { MODES, customisedKeys, feelOf, globalFeel, globalKeys, isSocdPair, setSocdPair, socdRules, usesFixed, usesRt } from "../model";
 import { applyFeel, keyNames, travelOfKey } from "./actuation";
 import { effectSelect } from "./lighting";
@@ -42,7 +42,6 @@ export const homePage: Page = {
         select: "none",
         visual: (i) => {
           const f = feelOf(c, i);
-          const led = primaryLedOfKey(i);
           const pair = rules.pairs.find((p) => p.a === i || p.b === i);
           return {
             label: KEY_LAYOUT[i].name,
@@ -50,7 +49,6 @@ export const homePage: Page = {
             sub: customSet.has(i) ? (usesFixed(f.mode) ? mm(f.actuationUm) : `±${mm(f.rtPressUm)}`) : undefined,
             state: usesRt(f.mode) ? "accent" : null,
             badge: pair ? "⇄" : undefined,
-            tint: l.enabled && l.solid[led] === 1 ? rgbToHex(l.colors[led]) : null,
             title: `${KEY_LAYOUT[i].name}: ${MODES.find((m) => m.mode === f.mode)?.label ?? "?"}, ${mm(f.actuationUm)} mm` +
               (pair ? `, SOCD pair with ${KEY_LAYOUT[pair.a === i ? pair.b : pair.a].name}` : ""),
           };
@@ -84,9 +82,9 @@ export const homePage: Page = {
         ),
         cardWith("Gaming", go("socd", otherRules > 0 ? `${plural(otherRules, "more rule")}` : "More pairs"),
           SOCD_PRESETS.slice(0, 2).map((p) => row(p.label,
-            toggle(`home-socd-${p.a}`, isSocdPair(c, p.a, p.b), (v) => void app.edit("SOCD", (d) => setSocdPair(d, p.a, p.b, v)), `SOCD ${p.label}`),
-            "the later key wins instead of cancelling")),
+            toggle(`home-socd-${p.a}`, isSocdPair(c, p.a, p.b), (v) => void app.edit("SOCD", (d) => setSocdPair(d, p.a, p.b, v)), `SOCD ${p.label}`))),
           row("Win key lock", toggle("home-winlock", c.winLock, (v) => void app.edit("Win lock", (d) => { d.winLock = v; }), "Win key lock"), "Win keys do nothing"),
+          help("SOCD pairs: the later key wins instead of the two cancelling out."),
         ),
       ),
       h("p", { class: "status-line" },

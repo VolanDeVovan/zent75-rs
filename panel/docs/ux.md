@@ -101,9 +101,9 @@ comparison against it, so undoing everything returns to `Saved`.
 **Save to keyboard** (button, `Ctrl+S`): the single way to persist. Enabled only when there is
 something to save. Closing the tab with unsaved edits asks first.
 
-**Undo** (button, `Ctrl+Z`): steps back one edit at a time (up to 50), including profile renames,
-switch-type changes, imports and a profile reset. Works after a save too (the result is then
-unsaved again).
+**Undo** (button, `Ctrl+Z`): steps back one profile edit at a time (up to 50), including an
+import and a profile reset. Works after a save too (the result is then unsaved again). The
+history belongs to the active profile and is dropped on a profile switch.
 
 **Discard** : writes the saved state back to the keyboard. One click, no dialog (Undo brings the
 edits back).
@@ -123,10 +123,16 @@ edits back).
 
 Factory values come from `firmware/core/src/defaults.rs` (`src/ui/defaults.ts`).
 
-**Not undoable, therefore confirmed:** custom switch curves and switch types (board-global;
-curves are flashed by the firmware on write), calibration finish (saves), import into all
-profiles (switches and saves each), reboot, bootloader. Switching profile with unsaved edits asks
-whether to save, discard, or stay.
+**Outside this model.** Profile names, switch types, calibration and custom switch curves are
+board-global and the firmware stores them on every write, so they are never "unsaved" and Undo
+does not cover them. Switch types and curves ask first; calibration finish says that it saves
+(which also stores unsaved profile edits); a rename is one dialog. Also confirmed: import (it
+can switch through and save all profiles), reboot, bootloader. Switching profile with unsaved
+edits offers Save and switch / Discard and switch / Stay.
+
+The saved state is what the panel read at connect: if the keyboard already held unsaved RAM
+edits from an earlier session, the panel cannot see that (flash cannot be read safely, `BE 01`
+hangs the firmware) and shows them as saved.
 
 ## Safety behaviour kept from the old panel
 

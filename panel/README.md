@@ -9,15 +9,33 @@ hall-effect keyboard (USB `36b0:357e`) over WebHID. It replaces the vendor web d
 
 ## What it covers
 
-| Tab | Functions |
+Pages are ordered by how often they are needed; the design and its reasons are in
+[`docs/ux.md`](docs/ux.md).
+
+| Page | Functions |
 |---|---|
-| Keymap | main and Fn layer, every key code of the firmware (HID, media, browser, mouse, board functions, Fn), raw code entry; per key and layer a **tap-hold** code and a **modifier mask** |
-| Actuation | per-key mode (normal / rapid trigger / **RT below the actuation point**, `key_mode` 2), actuation and release points, RT press / release sensitivity, top and bottom dead zones, switch type incl. the four **custom switches**, and an editor for their curves |
-| SOCD / DKS | SOCD ("last input wins") per key and as mutual pairs, key groups (up to 4 keys), DKS (4 slots × 4 travel phases, trigger points, timing). Groups and DKS need firmware ≥ 0.0.18 |
-| Lighting | on/off, Caps indicator, Fn-layer lighting, effect, hue, saturation, brightness, speed, static colour per key |
-| Calibration | manual calibration (start → press keys → finish and save, or abandon), automatic calibration switch |
-| Live travel | per-key travel in mm (or raw ADC) from the `BE FD` stream, kept alive by a 1 s heartbeat |
-| Device | firmware version, serial number, 4 profiles and their names, sleep timer, Win lock, save to flash, JSON export / import (one or all profiles, optional calibration), reset profile, reboot, enter bootloader (typed confirmation) |
+| Top bar | the keyboard's profiles (switch; menu on the active one: rename, export, reset), save state, **Undo**, **Discard**, **Save to keyboard** |
+| Home | typing feel for all keys (Normal / Rapid trigger, actuation point or sensitivity), lighting on / brightness / effect, SOCD A⇄D and W⇄S, Win lock, calibration status |
+| Actuation | global values with per-key override: mode (normal / rapid trigger / **RT below the actuation point**, `key_mode` 2), actuation and release points, RT press / release sensitivity, top and bottom dead zones, a travel gauge; reset per value, per selection, for all keys |
+| Lighting | on/off, effect, brightness, speed, hue, saturation, static colour per key, Caps indicator, Fn-layer lighting, reset |
+| SOCD | "last input wins": switches for the usual pairs, pair any two keys by clicking them, one-way rule with any key code, list of active rules |
+| Keymap | main and Fn layer; key codes by search (name, description, raw number) or category; per key and layer a **tap-hold** code and a **modifier mask**; factory default / revert / clear per key, reset of the main layer |
+| Advanced keys | key groups (up to 4 keys) and DKS (4 slots × 4 travel phases, trigger points, timing). Need firmware ≥ 0.0.18; on older firmware the page says so |
+| Sensors | live travel in mm or raw ADC (`BE FD` stream, 1 s heartbeat); manual calibration (start → press keys → finish and save, or abandon) and the automatic calibration switch; switch type per key incl. the four **custom switches**; editor for their curves |
+| Device | sleep timer, Win lock, JSON export / import (one or all profiles, optional calibration), firmware version, serial number, re-read; **Danger zone**: reset profile, reboot, enter bootloader (typed confirmation) |
+
+### Saving, undoing, resetting
+
+Edits go to the keyboard's RAM immediately (verified by reading back), so they can be felt at
+once; they survive a replug only after **Save to keyboard** (`Ctrl+S`). The top bar always shows
+`Saved` or `Unsaved: actuation, lighting, …`. **Undo** (`Ctrl+Z`, 50 steps) takes back one edit,
+**Discard** puts back the profile as last saved. A profile switch drops unsaved edits; the panel
+offers to save, discard or stay. Sliders have a reset-to-factory button, pages have a reset for
+their part of the profile, and "Reset profile" (profile menu, Danger zone) resets the whole
+profile through the firmware and saves, keeping the old profile for Undo.
+
+Profile names, switch types, calibration and custom switch curves are board-global and stored by
+the firmware on every write: they are not part of the unsaved state and Undo does not cover them.
 
 ### Tap-hold, modifier masks, key mode 2, custom switches
 
@@ -43,9 +61,6 @@ behaviour: `firmware/core/src/keys/`, `docs/algorithms.md`):
   the firmware at once** (and discarded if any key's stored calibration span is < 3000), so the
   editor asks before writing, writes only changed records, and never touches `top/bot`.
 
-Edits go to the keyboard's RAM immediately and are verified by reading back. They survive a
-replug only after **Save to flash**. A profile switch discards unsaved edits (the panel asks).
-
 ## Run
 
 ```sh
@@ -54,7 +69,7 @@ npm ci
 npm run dev        # http://localhost:5173
 npm run build      # type-check + static bundle in dist/ (relative paths, host anywhere)
 npm run preview    # serve dist/
-npm test           # vitest: codec, mock round trips, calibration, config files
+npm test           # vitest: codec, mock round trips, calibration, config files, UI state
 npm run typecheck  # tsc --noEmit over src, tests and scripts
 npm run smoke      # read-only check against the real keyboard from Node
 npm run write-check  # profile-name write + save + restore on the real keyboard
@@ -62,7 +77,7 @@ npm run write-check  # profile-name write + save + restore on the real keyboard
 
 ### Mock device
 
-- press **Mock device** on the start page, or open `http://localhost:5173/?mock=1`
+- press **Try the demo keyboard** on the start page, or open `http://localhost:5173/?mock=1`
 - `?mock=1&fw=0.0.9` emulates the older firmware without key groups / DKS
 
 The mock (`src/transport/mock.ts`) implements the `Transport` interface and behaves like the
@@ -92,11 +107,15 @@ src/transport/webhid.ts       Transport over WebHID
 src/transport/mock.ts         Transport that emulates the keyboard
 scripts/hidraw-transport.ts   Transport over /dev/hidrawN (Node)
 src/config-file.ts, config-io.ts   JSON format, export / import through KeyboardProtocol
-src/ui/                       app shell, keyboard view, one file per tab
+src/ui/store.ts               state and device operations: save state, undo, discard, reset (no DOM)
+src/ui/model.ts, defaults.ts  derived values (global actuation, SOCD pairs, picker search), factory values
+src/ui/app.ts                 shell: top bar, navigation, confirmations
+src/ui/components.ts, keyboard-view.ts, dom.ts   controls, key picker, travel gauge, keyboard drawing
+src/ui/pages/                 one file per page
 ```
 
 Adding a second protocol (our own firmware): implement `KeyboardProtocol` next to `zent/` and
-pick it in `createProtocol()` (`src/ui/app.ts`), for example by product id or by probing. The
+pick it in `createProtocol()` (`src/ui/store.ts`), for example by product id or by probing. The
 UI, the calibration flow, the JSON format and the tests against `KeyboardProtocol` stay as
 they are. `PROTOCOL-NOTES.md` documents what was learned from the vendor driver.
 
@@ -115,7 +134,7 @@ Safety built into the stock protocol:
 
 ## Tests
 
-`npm test` runs 113 tests in 7 files:
+`npm test` runs 141 tests in 9 files:
 
 - `crc.test.ts`: CRC-16/MODBUS catalogue vector, Modbus RTU frames, residue, bitwise reference
 - `frames.test.ts`: 1024-byte padding, report id 0, exact bytes of every command, both
@@ -129,6 +148,11 @@ Safety built into the stock protocol:
 - `tap-hold-switches.test.ts`: tap-hold / modifier-mask codec and mock round trip, custom switch
   record codec (byte-exact factory record, lossless), firmware validation rules, resampling,
   record-wise bank-1 writes, discard on implausible calibration, config-file round trip
+- `ui-model.test.ts`: global / customised actuation, validation, SOCD pairs, unsaved summary,
+  key picker categories and search, the tap-hold cap of 1000
+- `ui-store.test.ts`: the UI's state against the mock: unsaved state, save, undo, discard, queued
+  edits, profile switch and reset, board-global writes, refused tap-hold codes and custom switch
+  records, firmware without advanced keys, calibration finish
 
 ## Simulator end-to-end check
 
@@ -209,7 +233,7 @@ SMOKE OK
   against hardware from this code (see "Hardware write check"). Profile switch, calibration
   mode, reset, reboot and bootloader are tested against the mock only.
 - **WebHID in a real Chromium against the real keyboard.** The UI was driven end to end in
-  headless Chrome with the mock; the WebHID transport itself (device chooser, `sendReport`,
+  a browser with the mock; the WebHID transport itself (device chooser, `sendReport`,
   `inputreport`) has not been exercised with hardware.
 - The 1003-byte calibration stream variant is implemented from the vendor code and tested with
   the mock; it has not been captured from the real board.

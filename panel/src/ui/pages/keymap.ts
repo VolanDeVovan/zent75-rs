@@ -90,7 +90,8 @@ export const keymapPage: Page = {
           const name = KEY_LAYOUT[i].name;
           const hold = c.holdCode[layer][i];
           const mask = c.modMask[layer][i];
-          const changed = code !== app.store.saved!.keymap[layer][i];
+          const saved = app.store.saved!;
+          const changed = code !== saved.keymap[layer][i] || hold !== saved.holdCode[layer][i] || mask !== saved.modMask[layer][i];
           if (code === KEYCODE_EMPTY) return { label: "", sub: layer === "fn" ? name : "empty", state: "dim", title: `${name}: nothing on this layer`, dot: changed ? "unsaved" : null };
           const extra = [hold !== KEYCODE_EMPTY ? `hold ${keyTitle(hold)}` : "", mask ? `+ ${maskText(mask)}` : ""].filter(Boolean).join(", ");
           return {
