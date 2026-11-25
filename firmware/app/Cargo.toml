@@ -51,3 +51,8 @@ strip = false
 lto = true
 opt-level = "z" # optimize for size
 debug = 2
+
+# The 8 kHz scan path (engine + key pipeline + lighting bookkeeping) runs in zent-core: size
+# optimisation made it ~2x slower than the 125 µs scan budget allows.
+[profile.release.package.zent-core]
+opt-level = 3
