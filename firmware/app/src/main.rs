@@ -170,6 +170,7 @@ fn log_stats(scans_per_s: u32, cpu_mhz: u32) {
         count(&s.adc1_late),
         console::dropped(),
     );
+    scan::diag_line();
 }
 
 /// Load the config banks into the static keyboard (in place, see `kb`). Nothing else uses

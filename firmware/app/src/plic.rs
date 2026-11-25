@@ -42,36 +42,45 @@ pub fn enable(irq: impl InterruptExt, prio: Priority) {
     unsafe { irq.enable() };
 }
 
-/// Raw mutex for state shared between thread mode and the scan-processing interrupt
-/// (GPTMR1, [`PRIO_SCAN`]): holding it raises the PLIC threshold to `PRIO_SCAN`, which masks
-/// that interrupt (and anything lower) but never the ADC capture or USB — it is *not* a global
-/// critical section, so taking it cannot cost samples.
+/// Raw mutex for state shared between thread mode and the scan-processing interrupt (GPTMR1):
+/// holding it clears GPTMR1's *enable* bit in the PLIC, so that one handler cannot start, while
+/// the ADC capture, USB and everything else keep running — it is not a global critical section,
+/// so taking it cannot cost samples. A GPTMR1 request raised meanwhile stays pending in the
+/// gateway and is delivered as soon as the bit is set again.
+///
+/// It deliberately does not touch the PLIC threshold: in preemptive mode the hardware raises and
+/// restores the threshold itself on every claim / completion, and software writes racing with
+/// that left the threshold stuck at the scan priority on hardware (scan stopped, keys stuck).
 ///
 /// Keep the locked section short (no flash, no awaits): every µs delays `Keyboard::scan`.
 pub struct ScanLock;
 
+const SCAN_IRQ: u32 = pac::interrupt::GPTMR1 as u32;
+
+fn scan_irq_enabled(on: bool) -> bool {
+    let reg = pac::PLIC.targetint(0).inten((SCAN_IRQ / 32) as usize);
+    let bit = 1 << (SCAN_IRQ % 32);
+    let was = reg.read().0 & bit != 0;
+    reg.modify(|w| if on { w.0 |= bit } else { w.0 &= !bit });
+    was
+}
+
 // SAFETY: `RawMutex::lock` must give the closure exclusive access with respect to every other
-// context that locks the same mutex. The contexts are thread mode (one executor, single hart)
-// and the GPTMR1 handler; USB0 and ADC0 run at higher priorities and never take it (they only
-// touch atomics and wake tasks). While thread mode holds the lock the threshold is PRIO_SCAN,
-// so GPTMR1 cannot be delivered; GPTMR1 itself is never preempted by thread mode, and inside
-// its handler the PLIC has already raised the threshold to its priority. Nested locking from
-// one context is caught by the `RefCell` every `ScanLock` mutex in this firmware wraps.
+// context that locks the same mutex. Those are thread mode (one executor, single hart) and the
+// GPTMR1 handler; ADC0, USB0 and GPTMR0 never take it (they only touch atomics and wake tasks).
+// While thread mode holds the lock GPTMR1 is disabled in the PLIC, so its handler cannot run;
+// the handler itself is never preempted by thread mode. The enable register is only modified
+// with MIE off (here and at init), so the read-modify-write cannot race. Nested locking from one
+// context is caught by the `RefCell` every `ScanLock` mutex in this firmware wraps.
 unsafe impl RawMutex for ScanLock {
     const INIT: Self = ScanLock;
 
     fn lock<R>(&self, f: impl FnOnce() -> R) -> R {
-        let plic = pac::PLIC.targetconfig(0);
-        // Raise the threshold with MIE off so an interrupt that is already being signalled
-        // cannot slip in between; read back to make sure the PLIC took it.
-        let prev = critical_section::with(|_| {
-            let prev = plic.threshold().read().threshold();
-            plic.threshold().write(|w| w.set_threshold(prev.max(PRIO_SCAN as u32)));
-            let _ = plic.threshold().read();
-            prev
-        });
+        let was = critical_section::with(|_| scan_irq_enabled(false));
         let r = f();
-        plic.threshold().write(|w| w.set_threshold(prev));
+        if was {
+            critical_section::with(|_| scan_irq_enabled(true));
+        }
         r
     }
 }

@@ -501,3 +501,25 @@ fn process_frames() {
         }
     }
 }
+
+/// One-line dump of the scan-processing machinery (bring-up diagnostics).
+pub fn diag_line() {
+    let t = pac::GPTMR1;
+    let plic = pac::PLIC;
+    let id = pac::interrupt::GPTMR1 as usize;
+    let pend = plic.pending(id / 32).read().0 >> (id % 32) & 1;
+    let en = plic.targetint(0).inten(id / 32).read().0 >> (id % 32) & 1;
+    crate::log!(
+        "diag tmr cr {:#x} sr {:#x} irqen {:#x} cnt {} | plic pend {} en {} thr {} | inproc {} ready {} done {}",
+        t.channel(0).cr().read().0,
+        t.sr().read().0,
+        t.irqen().read().0,
+        t.channel(0).cnt().read(),
+        pend,
+        en,
+        plic.targetconfig(0).threshold().read().threshold(),
+        IN_PROCESS.load(Relaxed) as u8,
+        READY_SEQ.load(Relaxed),
+        LAST_DONE.load(Relaxed)
+    );
+}
