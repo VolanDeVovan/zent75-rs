@@ -482,9 +482,11 @@ impl Engine {
         }
         self.hkey[s] = dyb;
         let curve = self.curves.curve(self.typ[s]);
-        let fa = span.div(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000));
-        let fb = span.div(dz.wrapping_sub(dyb).wrapping_mul(0x10000));
-        let fc = span.div(dyb.wrapping_mul(-0x10000));
+        let [fa, fb, fc] = span.div3([
+            b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000),
+            dz.wrapping_sub(dyb).wrapping_mul(0x10000),
+            dyb.wrapping_mul(-0x10000),
+        ]);
         let hc = curve.height(fc) as i16;
         self.ha[s] = curve.height(fa) as i16;
         self.hb[s] = curve.height(fb) as i16;

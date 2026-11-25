@@ -84,16 +84,29 @@ impl Recip {
     #[inline(always)]
     pub fn div(&self, n: i32) -> i32 {
         match self.kind {
-            Kind::Magic => {
-                let mut q = ((self.m as i64 * n as i64) >> 32) as i32;
-                q = q.wrapping_add(n.wrapping_mul(self.add as i32));
-                q >>= self.shift;
-                q.wrapping_add(((q as u32) >> 31) as i32)
-            }
+            Kind::Magic => self.magic(n),
             Kind::One => n,
             Kind::MinusOne => n.wrapping_neg(),
             Kind::Zero => -1,
         }
+    }
+
+    /// Three quotients by the same divisor with one dispatch.
+    #[inline(always)]
+    pub fn div3(&self, n: [i32; 3]) -> [i32; 3] {
+        if self.kind == Kind::Magic {
+            n.map(|n| self.magic(n))
+        } else {
+            n.map(|n| self.div(n))
+        }
+    }
+
+    #[inline(always)]
+    fn magic(&self, n: i32) -> i32 {
+        let mut q = ((self.m as i64 * n as i64) >> 32) as i32;
+        q = q.wrapping_add(n.wrapping_mul(self.add as i32));
+        q >>= self.shift;
+        q.wrapping_add(((q as u32) >> 31) as i32)
     }
 }
 
@@ -136,6 +149,7 @@ mod tests {
             for _ in 0..200 {
                 let n = rnd();
                 assert_eq!(r.div(n), rv(n, d), "{n} / {d}");
+                assert_eq!(r.div3([n, n >> 7, -n]), [rv(n, d), rv(n >> 7, d), rv(n.wrapping_neg(), d)], "{n} / {d}");
                 let n = n >> 12;
                 assert_eq!(r.div(n), rv(n, d), "{n} / {d}");
             }
