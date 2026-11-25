@@ -14,6 +14,8 @@ PROFILE_COUNT = 4
 
 PROFILE_NAME_SIZE = 64
 BIND_RECORD_SIZE = 48  # bind_key_setting: one DKS / key-group record per key
+CUSTOM_SWITCH_SIZE = 256  # custom_switch: four records (keytype_code 0xFFF - i selects record i)
+CUSTOM_SWITCH_COUNT = 4
 
 #: Key index -> legend, row by row (Esc = 0, LShift = 59, LCtrl = 73, Right = 82).
 KEY_NAMES = (
@@ -32,6 +34,9 @@ BOT_VALUE = 0x800700B0
 SOFT_VERSION = 0x80070210
 CUR_PARAM_NUM = 0x80070218
 CONFIG_NAME = 0x80070290
+CUSTOM_SWITCH = 0x80070390
+HOLD_CODE = 0x80080000
+HOLD_CODE_FN = 0x800800B0
 KEY_MAP = 0x80080160
 KEY_MAP_FN = 0x80080210
 KEY_MODE = 0x800806E0
@@ -53,6 +58,8 @@ REGIONS: dict[str, tuple[int, int]] = {
     "cur_param_num": (CUR_PARAM_NUM, 4),
     **{f"config_name{i + 1}": (CONFIG_NAME + PROFILE_NAME_SIZE * i, PROFILE_NAME_SIZE)
        for i in range(PROFILE_COUNT)},
+    # custom switch curves; not used by the vendor driver. Every BE 03 here is saved to flash.
+    "custom_switch": (CUSTOM_SWITCH, CUSTOM_SWITCH_SIZE * CUSTOM_SWITCH_COUNT),
     # ---- active profile
     "key_map": (KEY_MAP, 2 * KEY_COUNT),
     "key_map_fn": (KEY_MAP_FN, 2 * KEY_COUNT),
@@ -73,6 +80,11 @@ REGIONS: dict[str, tuple[int, int]] = {
     "sleep_second_cnt": (0x80080C6C, 4),
     "win_lock_state": (0x80080C70, 1),
     "auto_calib_enable": (0x80080C71, 1),
+    # tap-hold codes and modifier masks per layer (not used by the vendor driver)
+    "hold_code": (HOLD_CODE, 2 * KEY_COUNT),
+    "hold_code_fn": (HOLD_CODE_FN, 2 * KEY_COUNT),
+    "mod_mask": (0x80080790, KEY_COUNT),
+    "mod_mask_fn": (0x800807E8, KEY_COUNT),
     # ---- firmware >= 0.0.18 only
     "bind_key_mode": (BIND_KEY_MODE, KEY_COUNT),
     **{f"bind_key_setting_{k:02d}": (BIND_KEY_SETTING + BIND_RECORD_SIZE * k, BIND_RECORD_SIZE)

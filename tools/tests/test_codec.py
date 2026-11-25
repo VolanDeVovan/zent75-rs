@@ -157,7 +157,9 @@ def test_table_helpers():
 
 
 def test_rammap():
-    assert len(rammap.REGIONS) == 29 + 83
+    assert len(rammap.REGIONS) == 34 + 83
+    assert rammap.REGIONS["custom_switch"] == (0x80070390, 1024)
+    assert rammap.REGIONS["mod_mask_fn"] == (0x800807E8, 83)
     assert rammap.REGIONS["config_name4"] == (0x80070350, 64)
     assert rammap.REGIONS["bind_key_setting_82"] == (0x80080D00 + 48 * 82, 48)
     assert rammap.in_map(0x80070000, 166) and not rammap.in_map(0x80070000, 167)

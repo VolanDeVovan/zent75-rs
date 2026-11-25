@@ -2,7 +2,11 @@
  * JSON import / export of a full configuration. Protocol-neutral: it stores the model from
  * protocol/keyboard.ts, not raw memory, so a file can be moved to another firmware later.
  */
-import type { AdvancedKey, Calibration, DeviceInfo, ProfileConfig } from "./protocol/keyboard";
+import {
+  type AdvancedKey, type Calibration, type CustomSwitch, type DeviceInfo, type Layered, type ProfileConfig,
+  CUSTOM_SWITCH_COUNT, KEYCODE_EMPTY,
+} from "./protocol/keyboard";
+import { validateCustomSwitch } from "./protocol/switches";
 
 export const FILE_FORMAT = "zent75-he-config";
 export const FILE_FORMAT_VERSION = 1;
@@ -22,6 +26,8 @@ export interface ConfigFile {
   profiles: ProfileExport[];
   /** board-global; only restored when the user asks for it */
   calibration?: Calibration;
+  /** board-global custom switch records 0..3; exported and restored together with the calibration */
+  customSwitches?: CustomSwitch[];
 }
 
 export class ConfigFileError extends Error {}
@@ -73,6 +79,41 @@ function validateAdvanced(value: unknown, path: string): AdvancedKey {
   };
 }
 
+/**
+ * A per-layer array. Missing (a file written before tap-hold existed in the panel) means the
+ * factory value on every key: tap-hold off, no modifier mask.
+ */
+function layered(value: unknown, path: string, keyCount: number, min: number, max: number, missing: number): Layered<number> {
+  if (value === undefined) return { main: new Array(keyCount).fill(missing), fn: new Array(keyCount).fill(missing) };
+  const o = obj(value, path);
+  return { main: intArray(o.main, `${path}.main`, keyCount, min, max), fn: intArray(o.fn, `${path}.fn`, keyCount, min, max) };
+}
+
+export function validateCustomSwitches(value: unknown, path = "customSwitches"): CustomSwitch[] {
+  if (!Array.isArray(value) || value.length !== CUSTOM_SWITCH_COUNT) fail(path, `expected ${CUSTOM_SWITCH_COUNT} entries`);
+  return value.map((v, i) => {
+    const p = `${path}[${i}]`;
+    const o = obj(v, p);
+    if (typeof o.name !== "string") fail(`${p}.name`, "expected a string");
+    const c = obj(o.color, `${p}.color`);
+    if (!Array.isArray(o.curve)) fail(`${p}.curve`, "expected an array");
+    const curve = intArray(o.curve, `${p}.curve`, o.curve.length, -32768, 32767);
+    if (!Array.isArray(o.spare)) fail(`${p}.spare`, "expected an array");
+    const sw: CustomSwitch = {
+      name: o.name,
+      travelUm: int(o.travelUm, `${p}.travelUm`, 0, 0xffffffff),
+      curve,
+      color: { r: int(c.r, `${p}.color.r`, 0, 255), g: int(c.g, `${p}.color.g`, 0, 255), b: int(c.b, `${p}.color.b`, 0, 255) },
+      wordF8: int(o.wordF8, `${p}.wordF8`, 0, 0xffffffff),
+      byteFC: int(o.byteFC, `${p}.byteFC`, 0, 255),
+      spare: intArray(o.spare, `${p}.spare`, o.spare.length, 0, 255),
+    };
+    const errors = validateCustomSwitch(sw);
+    if (errors.length) fail(p, errors.join(" "));
+    return sw;
+  });
+}
+
 /** Check and normalise an untrusted profile config. Throws ConfigFileError with the offending path. */
 export function validateProfileConfig(value: unknown, keyCount: number, ledCount: number, path = "config"): ProfileConfig {
   const c = obj(value, path);
@@ -90,6 +131,8 @@ export function validateProfileConfig(value: unknown, keyCount: number, ledCount
       main: intArray(keymap.main, `${path}.keymap.main`, keyCount, -32768, 32767),
       fn: intArray(keymap.fn, `${path}.keymap.fn`, keyCount, -32768, 32767),
     },
+    holdCode: layered(c.holdCode, `${path}.holdCode`, keyCount, -32768, KEYCODE_EMPTY, KEYCODE_EMPTY),
+    modMask: layered(c.modMask, `${path}.modMask`, keyCount, 0, 255, 0),
     keyMode: intArray(c.keyMode, `${path}.keyMode`, keyCount, 0, 255),
     actuationUm: perKeyU16("actuationUm"),
     releaseUm: perKeyU16("releaseUm"),
@@ -133,6 +176,7 @@ export function validateCalibration(value: unknown, keyCount: number, path = "ca
 
 export function buildConfigFile(
   info: DeviceInfo, activeProfile: number, profiles: ProfileExport[], calibration?: Calibration, now: Date = new Date(),
+  customSwitches?: CustomSwitch[],
 ): ConfigFile {
   return {
     format: FILE_FORMAT,
@@ -145,6 +189,7 @@ export function buildConfigFile(
     activeProfile,
     profiles,
     ...(calibration ? { calibration } : {}),
+    ...(customSwitches ? { customSwitches } : {}),
   };
 }
 
@@ -183,5 +228,6 @@ export function parseConfigFile(text: string, keyCount: number, ledCount: number
     activeProfile: int(f.activeProfile, "activeProfile", 0, 3),
     profiles,
     ...(f.calibration !== undefined ? { calibration: validateCalibration(f.calibration, keyCount) } : {}),
+    ...(f.customSwitches !== undefined ? { customSwitches: validateCustomSwitches(f.customSwitches) } : {}),
   };
 }

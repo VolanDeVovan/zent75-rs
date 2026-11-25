@@ -4,6 +4,7 @@
  *   201..225 consumer / system  251..255 mouse buttons
  *   301..320 board functions    401..404 Fn layers       1000 empty
  */
+import type { CustomSwitch } from "./keyboard";
 export interface KeyDef {
   code: number;
   /** short label for a key cap */
@@ -150,14 +151,26 @@ export const EFFECTS: readonly { id: number; name: string }[] = [
   { id: 50, name: "Sparkle, single colour" },
 ];
 
-/** Magnetic switch types (keytype_code) with their full travel. */
-export const SWITCH_TYPES: readonly { id: number; name: string; travelUm: number; minRtUm: number; calibSpan: number }[] = [
-  { id: 0, name: "TTC KOM (King of Magnetic)", travelUm: 3420, minRtUm: 10, calibSpan: 7000 },
-  { id: 1, name: "TTC KOM (new)", travelUm: 3375, minRtUm: 10, calibSpan: 7000 },
-  { id: 2, name: "Gateron Magnetic Jade Pro", travelUm: 3420, minRtUm: 15, calibSpan: 7000 },
-  { id: 3, name: "Type 3 (3.78 mm, not offered by the vendor UI)", travelUm: 3780, minRtUm: 30, calibSpan: 8000 },
+export interface SwitchTypeInfo { id: number; name: string; travelUm: number; minRtUm: number; calibSpan: number; custom: boolean }
+
+/**
+ * Magnetic switch types (keytype_code) with their full travel. 4095..4092 select the custom
+ * switch records 0..3 (their name and travel come from the record; see switchType()).
+ */
+export const SWITCH_TYPES: readonly SwitchTypeInfo[] = [
+  { id: 0, name: "TTC KOM (King of Magnetic)", travelUm: 3420, minRtUm: 10, calibSpan: 7000, custom: false },
+  { id: 1, name: "TTC KOM (new)", travelUm: 3375, minRtUm: 10, calibSpan: 7000, custom: false },
+  { id: 2, name: "Gateron Magnetic Jade Pro", travelUm: 3420, minRtUm: 15, calibSpan: 7000, custom: false },
+  { id: 3, name: "Type 3 (3.78 mm, not offered by the vendor UI)", travelUm: 3780, minRtUm: 30, calibSpan: 8000, custom: false },
+  ...[0, 1, 2, 3].map((i) => ({ id: 4095 - i, name: `Custom switch ${i + 1}`, travelUm: 3420, minRtUm: 10, calibSpan: 7000, custom: true })),
 ];
 
-export function switchType(id: number) {
-  return SWITCH_TYPES.find((s) => s.id === id) ?? SWITCH_TYPES[0];
+/**
+ * Info for a keytype_code. With the board's custom records, a custom type gets the record's name
+ * and travel (the firmware takes the travel from the record too). Unknown codes behave like type 0.
+ */
+export function switchType(id: number, customs?: readonly CustomSwitch[] | null): SwitchTypeInfo {
+  const base = SWITCH_TYPES.find((s) => s.id === id) ?? SWITCH_TYPES[0];
+  const rec = base.custom && customs ? customs[4095 - base.id] : undefined;
+  return rec ? { ...base, name: `${base.name}: ${rec.name}`, travelUm: rec.travelUm } : base;
 }

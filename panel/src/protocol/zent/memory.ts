@@ -6,8 +6,8 @@
  * board-global, 0x8008xxxx belongs to the active profile and is swapped by BE C0.
  */
 import {
-  type AdvancedKey, type Calibration, type Lighting, type ProfileConfig, type Rgb,
-  ADV_NONE, KEYCODE_EMPTY,
+  type AdvancedKey, type Calibration, type CustomSwitch, type Lighting, type ProfileConfig, type Rgb,
+  ADV_NONE, CURVE_MAX_POINTS, CUSTOM_SWITCH_COUNT, KEYCODE_EMPTY,
 } from "../keyboard";
 import { KEY_COUNT, LED_COUNT } from "../layout";
 
@@ -36,6 +36,7 @@ const whole = (name: string, address: number, length: number, unit: number): Reg
 export const BIND_RECORD_SIZE = 48;
 export const PROFILE_NAME_SIZE = 64;
 export const PROFILE_COUNT = 4;
+export const CUSTOM_SWITCH_SIZE = 256;
 
 export const REGIONS = {
   // ---- board-global
@@ -45,7 +46,12 @@ export const REGIONS = {
   soft_version: region("soft_version", 0x80070210, 4, 4, false),
   cur_param_num: region("cur_param_num", 0x80070218, 4, 4, false),
   config_name: region("config_name", 0x80070290, PROFILE_NAME_SIZE * PROFILE_COUNT, PROFILE_NAME_SIZE),
+  // four 256-byte custom switch records; written record by record (each bank-1 write is saved
+  // to flash and re-derives the curves at once)
+  custom_switch: region("custom_switch", 0x80070390, CUSTOM_SWITCH_SIZE * CUSTOM_SWITCH_COUNT, CUSTOM_SWITCH_SIZE),
   // ---- active profile
+  hold_code: region("hold_code", 0x80080000, 2 * KEY_COUNT, 2),
+  hold_code_fn: region("hold_code_fn", 0x800800b0, 2 * KEY_COUNT, 2),
   key_map: region("key_map", 0x80080160, 2 * KEY_COUNT, 2),
   key_map_fn: region("key_map_fn", 0x80080210, 2 * KEY_COUNT, 2),
   press_th: whole("press_th", 0x800802c0, 2 * KEY_COUNT, 2),
@@ -55,6 +61,8 @@ export const REGIONS = {
   norm_press_th: whole("norm_press_th", 0x80080580, 2 * KEY_COUNT, 2),
   norm_return_th: whole("norm_return_th", 0x80080630, 2 * KEY_COUNT, 2),
   key_mode: whole("key_mode", 0x800806e0, KEY_COUNT, 1),
+  mod_mask: region("mod_mask", 0x80080790, KEY_COUNT, 1),
+  mod_mask_fn: region("mod_mask_fn", 0x800807e8, KEY_COUNT, 1),
   key_cancel_code: region("key_cancel_code", 0x80080a50, 2 * KEY_COUNT, 2),
   rgb: whole("rgb", 0x80080b00, 3 * LED_COUNT, 3),
   rgb_solid_enable: whole("rgb_solid_enable", 0x80080c08, LED_COUNT, 1),
@@ -75,13 +83,14 @@ export type Images = Partial<Record<RegionName, Uint8Array>>;
 
 /** Regions that make up a ProfileConfig. */
 export const PROFILE_REGIONS: readonly RegionName[] = [
-  "key_map", "key_map_fn", "press_th", "return_th", "press_deadzone", "return_deadzone",
+  "key_map", "key_map_fn", "hold_code", "hold_code_fn", "mod_mask", "mod_mask_fn", "press_th", "return_th", "press_deadzone", "return_deadzone",
   "norm_press_th", "norm_return_th", "key_mode", "key_cancel_code",
   "rgb", "rgb_solid_enable", "rgb_config", "rgb_enable", "cap_enable", "rgb_fn_enable",
   "sleep_second_cnt", "win_lock_state", "auto_calib_enable",
 ];
 export const ADVANCED_REGIONS: readonly RegionName[] = ["bind_key_mode", "bind_key_setting"];
 export const CALIBRATION_REGIONS: readonly RegionName[] = ["top_value", "bot_value", "keytype_code"];
+export const CUSTOM_SWITCH_REGIONS: readonly RegionName[] = ["custom_switch"];
 
 /** First firmware (numeric version) that has bind_key_setting / bind_key_mode. */
 export const ADVANCED_KEYS_MIN_VERSION = 18;
@@ -241,6 +250,79 @@ export function emptyAdvancedKey(): AdvancedKey {
   };
 }
 
+// ---------------------------------------------------------------- custom switch record (256 bytes)
+
+/*
+ * 0x00  u32 full travel, µm (valid 1500..4200)
+ * 0x04  u32 number of curve points n (≤ 88)
+ * 0x08  i16[88] curve area: n points, the rest unused (0xFF on a factory record)
+ * 0xB8  64-byte UTF-8 name, zero padded
+ * 0xF8  u32, default 6000 (unknown)
+ * 0xFC  u8, default 0 (unknown)
+ * 0xFD  RGB display colour
+ */
+const CS_CURVE = 0x08;
+const CS_CURVE_BYTES = 2 * CURVE_MAX_POINTS;
+const CS_NAME = 0xb8;
+const CS_NAME_SIZE = 64;
+
+const rdU32 = (b: ArrayLike<number>, o: number) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+function wrU32(b: Uint8Array, o: number, v: number, what: string): void {
+  if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new RangeError(`${what} = ${v} is not a u32`);
+  b[o] = v & 0xff; b[o + 1] = (v >>> 8) & 0xff; b[o + 2] = (v >>> 16) & 0xff; b[o + 3] = (v >>> 24) & 0xff;
+}
+
+export function decodeCustomSwitch(rec: ArrayLike<number>): CustomSwitch {
+  if (rec.length !== CUSTOM_SWITCH_SIZE) throw new RangeError(`custom switch record must be ${CUSTOM_SWITCH_SIZE} bytes`);
+  const b = Array.from(rec);
+  const n = Math.min(rdU32(b, 4), CURVE_MAX_POINTS);
+  const nameBytes = b.slice(CS_NAME, CS_NAME + CS_NAME_SIZE);
+  const end = nameBytes.indexOf(0);
+  return {
+    name: new TextDecoder("utf-8").decode(Uint8Array.from(end < 0 ? nameBytes : nameBytes.slice(0, end))),
+    travelUm: rdU32(b, 0),
+    curve: i16le(b.slice(CS_CURVE, CS_CURVE + 2 * n)),
+    color: { r: b[0xfd], g: b[0xfe], b: b[0xff] },
+    wordF8: rdU32(b, 0xf8),
+    byteFC: b[0xfc],
+    spare: b.slice(CS_CURVE + 2 * n, CS_CURVE + CS_CURVE_BYTES),
+  };
+}
+
+export function encodeCustomSwitch(sw: CustomSwitch): Uint8Array {
+  const out = new Uint8Array(CUSTOM_SWITCH_SIZE);
+  if (!Array.isArray(sw.curve) || sw.curve.length > CURVE_MAX_POINTS) throw new RangeError(`curve must have at most ${CURVE_MAX_POINTS} points`);
+  wrU32(out, 0, sw.travelUm, "travelUm");
+  wrU32(out, 4, sw.curve.length, "points");
+  // unused curve slots: whatever the record held (spare), 0xFF where that runs out
+  const area = new Uint8Array(CS_CURVE_BYTES).fill(0xff);
+  area.set(packI16(sw.curve, "curve"));
+  area.set(packU8(sw.spare.slice(0, CS_CURVE_BYTES - 2 * sw.curve.length), "spare"), 2 * sw.curve.length);
+  out.set(area, CS_CURVE);
+  const name = new TextEncoder().encode(sw.name);
+  if (name.length === 0) throw new RangeError("custom switch name must not be empty");
+  if (name.length > CS_NAME_SIZE - 1) throw new RangeError(`custom switch name is longer than ${CS_NAME_SIZE - 1} bytes`);
+  out.set(name, CS_NAME);
+  wrU32(out, 0xf8, sw.wordF8, "wordF8");
+  out[0xfc] = packU8([sw.byteFC], "byteFC")[0];
+  out.set(packU8([sw.color.r, sw.color.g, sw.color.b], "color"), 0xfd);
+  return out;
+}
+
+export function decodeCustomSwitches(img: Uint8Array): CustomSwitch[] {
+  if (img.length !== REGIONS.custom_switch.length) throw new Error(`region custom_switch: expected ${REGIONS.custom_switch.length} bytes, got ${img.length}`);
+  const out: CustomSwitch[] = [];
+  for (let i = 0; i < CUSTOM_SWITCH_COUNT; i++) out.push(decodeCustomSwitch(img.subarray(i * CUSTOM_SWITCH_SIZE, (i + 1) * CUSTOM_SWITCH_SIZE)));
+  return out;
+}
+
+export function encodeCustomSwitches(list: CustomSwitch[]): Images {
+  expectLength(list, CUSTOM_SWITCH_COUNT, "customSwitches");
+  const img = new Uint8Array(REGIONS.custom_switch.length);
+  list.forEach((sw, i) => img.set(encodeCustomSwitch(sw), i * CUSTOM_SWITCH_SIZE));
+  return { custom_switch: img };
+}
+
 // ---------------------------------------------------------------- profile config <-> images
 
 function need(images: Images, name: RegionName): Uint8Array {
@@ -282,6 +364,8 @@ export function decodeProfile(images: Images): ProfileConfig {
 
   return {
     keymap: { main: i16le(need(images, "key_map")), fn: i16le(need(images, "key_map_fn")) },
+    holdCode: { main: i16le(need(images, "hold_code")), fn: i16le(need(images, "hold_code_fn")) },
+    modMask: { main: Array.from(need(images, "mod_mask")), fn: Array.from(need(images, "mod_mask_fn")) },
     keyMode: Array.from(need(images, "key_mode")),
     actuationUm: u16le(need(images, "norm_press_th")),
     releaseUm: u16le(need(images, "norm_return_th")),
@@ -296,6 +380,14 @@ export function decodeProfile(images: Images): ProfileConfig {
     winLock: need(images, "win_lock_state")[0] === 1,
     autoCalibration: need(images, "auto_calib_enable")[0] === 1,
   };
+}
+
+/** The firmware treats a profile whose first hold code is > 1000 as corrupt; no valid code is above 1000. */
+function holdCodes(values: number[], what: string): number[] {
+  values.forEach((v, i) => {
+    if (v > KEYCODE_EMPTY) throw new RangeError(`${what}[${i}] = ${v}: hold codes above ${KEYCODE_EMPTY} are not allowed`);
+  });
+  return values;
 }
 
 export function encodeProfile(config: ProfileConfig): Images {
@@ -316,6 +408,10 @@ export function encodeProfile(config: ProfileConfig): Images {
   const images: Images = {
     key_map: packI16(perKey(config.keymap.main, "keymap.main"), "keymap.main"),
     key_map_fn: packI16(perKey(config.keymap.fn, "keymap.fn"), "keymap.fn"),
+    hold_code: packI16(holdCodes(perKey(config.holdCode.main, "holdCode.main"), "holdCode.main"), "holdCode.main"),
+    hold_code_fn: packI16(holdCodes(perKey(config.holdCode.fn, "holdCode.fn"), "holdCode.fn"), "holdCode.fn"),
+    mod_mask: packU8(perKey(config.modMask.main, "modMask.main"), "modMask.main"),
+    mod_mask_fn: packU8(perKey(config.modMask.fn, "modMask.fn"), "modMask.fn"),
     key_mode: packU8(perKey(config.keyMode, "keyMode"), "keyMode"),
     norm_press_th: packU16(perKey(config.actuationUm, "actuationUm"), "actuationUm"),
     norm_return_th: packU16(perKey(config.releaseUm, "releaseUm"), "releaseUm"),

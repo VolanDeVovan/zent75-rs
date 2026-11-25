@@ -7,6 +7,7 @@ import type { KeyboardProtocol, ProfileConfig } from "./protocol/keyboard";
 export interface ExportOptions {
   /** walk through all profiles (switches profiles on the board and switches back) */
   allProfiles: boolean;
+  /** calibration, switch types and the custom switch curves (all board-global) */
   includeCalibration: boolean;
 }
 
@@ -28,7 +29,8 @@ export async function exportConfig(kb: KeyboardProtocol, options: ExportOptions)
     profiles.push({ index: active, name: names[active], config: await kb.readConfig() });
   }
   const calibration = options.includeCalibration ? await kb.readCalibration() : undefined;
-  return buildConfigFile(kb.info, active, profiles, calibration);
+  const customSwitches = options.includeCalibration ? await kb.readCustomSwitches() : undefined;
+  return buildConfigFile(kb.info, active, profiles, calibration, undefined, customSwitches);
 }
 
 export interface ImportOptions {
@@ -38,6 +40,7 @@ export interface ImportOptions {
    */
   mode: "active" | "all";
   restoreNames: boolean;
+  /** calibration, switch types and the custom switch curves of the file */
   restoreCalibration: boolean;
   /** persist with save(); always on for mode "all" because a profile switch drops unsaved RAM */
   save: boolean;
@@ -94,6 +97,8 @@ export async function importConfig(kb: KeyboardProtocol, file: ConfigFile, optio
   }
 
   if (options.restoreCalibration) {
+    // the curves first: switch types may refer to them (bank 1, saved by the firmware at once)
+    if (file.customSwitches) result.bytesWritten += await kb.writeCustomSwitches(file.customSwitches);
     if (file.calibration) result.bytesWritten += await kb.writeCalibration(file.calibration);
     else notes.push("The file has no calibration data.");
   }

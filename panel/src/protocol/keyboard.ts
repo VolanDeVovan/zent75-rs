@@ -8,6 +8,26 @@
 
 export const KEY_MODE_NORMAL = 0;
 export const KEY_MODE_RAPID_TRIGGER = 1;
+/**
+ * Normal press at the actuation point, rapid trigger only below it: an RT release keeps the key
+ * "RT-released" (not sent) until it re-presses by RT or comes back above the release point.
+ */
+export const KEY_MODE_RT_BELOW = 2;
+
+/**
+ * Tap-hold: a key with a hold code sends nothing while pressed; held longer than this it sends
+ * the hold code, released earlier it sends its keymap code for one report (a tap). Fixed in the
+ * firmware (4000 scans at 8 kHz), not configurable.
+ */
+export const TAP_HOLD_MS = 500;
+
+/** Modifier-mask bits (= HID boot-report modifier byte). */
+export const MOD_BITS: readonly { bit: number; label: string; code: number }[] = [
+  { bit: 0x01, label: "LCtrl", code: -8 }, { bit: 0x02, label: "LShift", code: -7 },
+  { bit: 0x04, label: "LAlt", code: -6 }, { bit: 0x08, label: "LWin", code: -5 },
+  { bit: 0x10, label: "RCtrl", code: -4 }, { bit: 0x20, label: "RShift", code: -3 },
+  { bit: 0x40, label: "RAlt", code: -2 }, { bit: 0x80, label: "RWin", code: -1 },
+];
 
 /** bind_key_mode values */
 export const ADV_NONE = 0;
@@ -80,22 +100,32 @@ export interface Lighting {
   solid: number[];
 }
 
+/** A per-key value on both keymap layers. */
+export interface Layered<T> { main: T[]; fn: T[] }
+
 /** Everything that belongs to one profile. */
 export interface ProfileConfig {
-  keymap: { main: number[]; fn: number[] };
-  /** KEY_MODE_NORMAL | KEY_MODE_RAPID_TRIGGER per key */
+  keymap: Layered<number>;
+  /**
+   * Tap-hold code per key and layer (see TAP_HOLD_MS); KEYCODE_EMPTY = off. Codes above 1000 are
+   * refused: the firmware treats a profile whose first entry is > 1000 as corrupt.
+   */
+  holdCode: Layered<number>;
+  /** Modifier bits (MOD_BITS) ORed into the report while the key is pressed, per layer; 0 = none. */
+  modMask: Layered<number>;
+  /** KEY_MODE_NORMAL | KEY_MODE_RAPID_TRIGGER | KEY_MODE_RT_BELOW per key */
   keyMode: number[];
   /** normal mode: actuation point, µm (norm_press_th) */
   actuationUm: number[];
   /** normal mode: release point, µm (norm_return_th) */
   releaseUm: number[];
-  /** rapid trigger: press sensitivity, µm (press_th) */
+  /** rapid trigger (modes 1 and 2): press sensitivity, µm (press_th) */
   rtPressUm: number[];
-  /** rapid trigger: release sensitivity, µm (return_th) */
+  /** rapid trigger (modes 1 and 2): release sensitivity, µm (return_th) */
   rtReleaseUm: number[];
-  /** rapid trigger: dead zone at the top of the travel, µm (press_deadzone) */
+  /** rapid trigger (modes 1 and 2): dead zone at the top of the travel, µm (press_deadzone) */
   topDeadzoneUm: number[];
-  /** rapid trigger: dead zone at the bottom of the travel, µm (return_deadzone) */
+  /** rapid trigger (modes 1 and 2): dead zone at the bottom of the travel, µm (return_deadzone) */
   bottomDeadzoneUm: number[];
   /** SOCD "last input wins": key code that this key cancels while held; KEYCODE_EMPTY = off */
   socd: number[];
@@ -114,8 +144,40 @@ export interface Calibration {
   top: number[];
   /** ADC counts with the key bottomed out (bot_value) */
   bottom: number[];
-  /** magnetic switch type per key (keytype_code) */
+  /** magnetic switch type per key (keytype_code; 4095..4092 = custom switch record 0..3) */
   switchType: number[];
+}
+
+/** Number of user-defined switch records (board-global). */
+export const CUSTOM_SWITCH_COUNT = 4;
+/** keytype_code of custom switch record i is CUSTOM_SWITCH_CODE_BASE - i (4095..4092). */
+export const CUSTOM_SWITCH_CODE_BASE = 4095;
+/** Most curve points a record can hold. */
+export const CURVE_MAX_POINTS = 88;
+/** Required value of the last curve point (normalised sensor position at full travel). */
+export const CURVE_LAST = 2636;
+/** Distance between curve points, µm of travel; point 0 sits this far above rest. */
+export const CURVE_STEP_UM = 50;
+
+/**
+ * A user-defined switch (board-global, bank 1): its travel curve maps the normalised sensor
+ * position f (0 at rest … 2636 at full swing) to key travel. Point i is the f the sensor reads
+ * at travel (i − 1) · 50 µm; the last point is the full travel and must be 2636.
+ */
+export interface CustomSwitch {
+  name: string;
+  /** full travel, µm (1500..4200) */
+  travelUm: number;
+  /** curve points, non-decreasing, 2..88 entries, last = CURVE_LAST */
+  curve: number[];
+  /** display colour of the vendor driver */
+  color: Rgb;
+  /** u32 at +0xF8 (default 6000, meaning unknown; 0xFFFF marks the record invalid) */
+  wordF8: number;
+  /** u8 at +0xFC (default 0, meaning unknown; 0xFF marks the record invalid) */
+  byteFC: number;
+  /** raw bytes of the curve area behind the last point (kept so that a round trip is lossless) */
+  spare: number[];
 }
 
 export interface DeviceInfo {
@@ -173,6 +235,14 @@ export interface KeyboardProtocol {
    * (as last read or written through this object) are sent. Returns the number of bytes written.
    */
   writeConfig(config: ProfileConfig): Promise<number>;
+
+  // ---- custom switch curves (board-global; the firmware saves them to flash on every write)
+  readCustomSwitches(): Promise<CustomSwitch[]>;
+  /**
+   * Write the records that differ from the device, one at a time. Validate first
+   * (protocol/switches.ts): an invalid record is replaced by the default on the next boot.
+   */
+  writeCustomSwitches(switches: CustomSwitch[]): Promise<number>;
 
   // ---- calibration
   readCalibration(): Promise<Calibration>;

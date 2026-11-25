@@ -52,7 +52,7 @@ def test_panel_regions_match_rammap():
     src = _read("panel", "src", "protocol", "zent", "memory.ts")
     regions = {m[1]: int(m[2], 16)
                for m in re.finditer(r'(?:whole|region)\("(\w+)", (0x[0-9a-fA-F]+),', src)}
-    assert len(regions) == 27
+    assert len(regions) == 32
     first = {"config_name": "config_name1", "bind_key_setting": "bind_key_setting_00"}
     for name, addr in regions.items():
         assert rammap.REGIONS[first.get(name, name)][0] == addr, name

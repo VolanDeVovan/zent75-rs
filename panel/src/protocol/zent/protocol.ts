@@ -3,9 +3,10 @@
  * Everything that knows about BE..ED frames and vendor addresses is in this directory.
  */
 import type {
-  Calibration, DeviceInfo, KeyboardEvents, KeyboardProtocol, LiveSample, ProfileConfig,
+  Calibration, CustomSwitch, DeviceInfo, KeyboardEvents, KeyboardProtocol, LiveSample, ProfileConfig,
 } from "../keyboard";
 import { KEY_COUNT, LED_COUNT } from "../layout";
+import { validateCustomSwitch } from "../switches";
 import { Emitter, type Transport } from "../transport";
 import {
   type DeviceFrame, type ReadReply,
@@ -15,8 +16,8 @@ import {
 import {
   type Images, type Region, type RegionName, type WriteRun,
   ADVANCED_KEYS_MIN_VERSION, ADVANCED_REGIONS, CALIBRATION_REGIONS, PROFILE_COUNT, PROFILE_NAME_SIZE, PROFILE_REGIONS, REGIONS,
-  decodeCalibration, decodeProfile, decodeProfileName, decodeVersion, diffRegion, encodeCalibration, encodeProfile,
-  encodeProfileName, findRegion,
+  decodeCalibration, decodeCustomSwitches, decodeProfile, decodeProfileName, decodeVersion, diffRegion, encodeCalibration,
+  encodeCustomSwitches, encodeProfile, encodeProfileName, findRegion,
 } from "./memory";
 
 export interface ZentOptions {
@@ -391,6 +392,28 @@ export class ZentStockProtocol implements KeyboardProtocol {
       delete images.bind_key_setting;
     }
     return this.writeImages(images);
+  }
+
+  // ------------------------------------------------------------ custom switch curves
+
+  async readCustomSwitches(): Promise<CustomSwitch[]> {
+    const img = await this.readRegion("custom_switch");
+    this.cache.custom_switch = img;
+    return decodeCustomSwitches(img);
+  }
+
+  /**
+   * Bank 1: every BE 03 is saved to flash by the firmware and re-derives the curves, so only
+   * changed records are written, each as one 256-byte record (255 + 1 bytes on the wire; the
+   * last byte is the colour's blue). Invalid records are refused here: the firmware would
+   * ignore them now and replace them with the factory record at the next boot.
+   */
+  async writeCustomSwitches(switches: CustomSwitch[]): Promise<number> {
+    switches.forEach((sw, i) => {
+      const errors = validateCustomSwitch(sw);
+      if (errors.length) throw new RangeError(`custom switch ${i + 1}: ${errors.join(" ")}`);
+    });
+    return this.writeImages(encodeCustomSwitches(switches));
   }
 
   // ------------------------------------------------------------ calibration

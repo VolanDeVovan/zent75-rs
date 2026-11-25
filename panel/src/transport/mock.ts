@@ -5,7 +5,9 @@
  * Emulated: global + per-profile memory with a separate "flash" copy, BE 03 CRC check and
  * ack, BE 04 / BE 01 reads, BE C0 profile switch with the pushed notice, BE 02 save,
  * BE EE reset, BE FF reboot, BE FC bootloader, BE FE calibration mode, BE 1D serial and the
- * BE FD stream (both variants) that runs while heartbeats keep arriving.
+ * BE FD stream (both variants) that runs while heartbeats keep arriving. Bank-1 writes are saved
+ * to flash at once and discarded when they leave any key with |bot − top| < 3000, like the
+ * firmware (`write_global`).
  */
 import { DEFAULT_KEYMAP, KEY_COUNT, LED_COUNT } from "../protocol/layout";
 import { Emitter, type DisconnectListener, type ReportListener, type Transport, type TransportInfo } from "../protocol/transport";
@@ -14,13 +16,15 @@ import {
   encodeStreamTravel, encodeWriteAck,
 } from "../protocol/zent/frames";
 import {
-  ADVANCED_KEYS_MIN_VERSION, BIND_RECORD_SIZE, REGIONS, emptyAdvancedKey, encodeAdvancedKey, encodeVersion, packI16, packU16,
-  u16le, i16le,
+  ADVANCED_KEYS_MIN_VERSION, BIND_RECORD_SIZE, REGIONS, decodeCustomSwitches, emptyAdvancedKey, encodeAdvancedKey,
+  encodeCustomSwitches, encodeVersion, packI16, packU16, u16le, i16le,
 } from "../protocol/zent/memory";
 import { switchType } from "../protocol/keycodes";
+import { defaultCustomSwitch } from "../protocol/switches";
 
 const GLOBAL_BASE = 0x80070000;
-const GLOBAL_SIZE = 0x400;
+/** bank-1 shadow size of the firmware */
+const GLOBAL_SIZE = 0x790;
 const PROFILE_BASE = 0x80080000;
 const PROFILE_SIZE = 0x2000;
 
@@ -60,7 +64,7 @@ export class MockDevice implements Transport {
   isOpen = false;
 
   /** counters and switches for tests */
-  readonly log = { requests: 0, writes: 0, crcErrors: 0, saves: 0, heartbeats: 0, unknown: 0, bytesWritten: 0 };
+  readonly log = { requests: 0, writes: 0, crcErrors: 0, saves: 0, globalSaves: 0, heartbeats: 0, unknown: 0, bytesWritten: 0 };
   /** drop this many upcoming replies (to exercise retries) */
   dropReplies = 0;
   /** corrupt the CRC of this many upcoming read replies */
@@ -181,6 +185,7 @@ export class MockDevice implements Transport {
     const top = u16le(this.peek(REGIONS.top_value.address, REGIONS.top_value.length));
     const bot = u16le(this.peek(REGIONS.bot_value.address, REGIONS.bot_value.length));
     const types = i16le(this.peek(REGIONS.keytype_code.address, REGIONS.keytype_code.length));
+    const customs = this.customSwitches();
     // with auto-calibration on, the firmware tracks the real rest level instead of trusting top_value
     const auto = this.profile[REGIONS.auto_calib_enable.address - PROFILE_BASE] === 1;
     const travel = raw.map((v, k) => {
@@ -188,7 +193,7 @@ export class MockDevice implements Transport {
       const span = top[k] - bot[k];
       if (span <= 0) return 0;
       const f = Math.min(1, Math.max(0, (top[k] - v) / span));
-      const um = Math.round(f * switchType(types[k]).travelUm);
+      const um = Math.round(f * switchType(types[k], customs).travelUm);
       return um < 20 ? 0 : um;
     });
     this.emit(encodeStreamTravel(raw, travel));
@@ -213,6 +218,7 @@ export class MockDevice implements Transport {
     put(g, GLOBAL_BASE, REGIONS.bot_value.address, packU16(new Array(KEY_COUNT).fill(17000)));
     put(g, GLOBAL_BASE, REGIONS.keytype_code.address, packI16(new Array(KEY_COUNT).fill(2)));
     put(g, GLOBAL_BASE, REGIONS.soft_version.address, encodeVersion(...this.opts.version));
+    put(g, GLOBAL_BASE, REGIONS.custom_switch.address, encodeCustomSwitches([0, 1, 2, 3].map(defaultCustomSwitch)).custom_switch!);
   }
 
   private factoryProfile(): Uint8Array {
@@ -222,6 +228,8 @@ export class MockDevice implements Transport {
     fn[0] = 319; fn[28] = 315; fn[43] = 313; fn[71] = 311; fn[81] = 312; fn[82] = 317; fn[80] = 318; fn[74] = 316;
     put(p, PROFILE_BASE, REGIONS.key_map.address, packI16(DEFAULT_KEYMAP));
     put(p, PROFILE_BASE, REGIONS.key_map_fn.address, packI16(fn));
+    put(p, PROFILE_BASE, REGIONS.hold_code.address, packI16(all(1000)));
+    put(p, PROFILE_BASE, REGIONS.hold_code_fn.address, packI16(all(1000)));
     put(p, PROFILE_BASE, REGIONS.press_th.address, packU16(all(300)));
     put(p, PROFILE_BASE, REGIONS.return_th.address, packU16(all(300)));
     put(p, PROFILE_BASE, REGIONS.press_deadzone.address, packU16(all(100)));
@@ -244,6 +252,17 @@ export class MockDevice implements Transport {
       for (let k = 0; k < KEY_COUNT; k++) put(p, PROFILE_BASE, REGIONS.bind_key_setting.address + k * BIND_RECORD_SIZE, rec);
     }
     return p;
+  }
+
+  /** Custom switch records as the mock holds them (for assertions). */
+  customSwitches() {
+    return decodeCustomSwitches(this.peek(REGIONS.custom_switch.address, REGIONS.custom_switch.length));
+  }
+
+  private calibrationImplausible(): boolean {
+    const top = u16le(this.peek(REGIONS.top_value.address, REGIONS.top_value.length));
+    const bot = u16le(this.peek(REGIONS.bot_value.address, REGIONS.bot_value.length));
+    return top.some((t, k) => Math.abs(bot[k] - t) < 3000);
   }
 
   private get hasAdvanced(): boolean {
@@ -316,7 +335,17 @@ export class MockDevice implements Transport {
         const readOnly = [REGIONS.soft_version, REGIONS.cur_param_num].some(
           (r) => req.address < r.address + r.length && req.address + req.data.length > r.address,
         );
-        if (!readOnly) m.mem.set(req.data, m.offset);
+        if (!readOnly) {
+          const before = m.mem.slice(m.offset, m.offset + req.data.length);
+          m.mem.set(req.data, m.offset);
+          if (m.mem === this.global) {
+            if (this.calibrationImplausible()) m.mem.set(before, m.offset);
+            else {
+              this.flashGlobal.set(this.global);
+              this.log.globalSaves++;
+            }
+          }
+        }
         this.log.writes++;
         this.log.bytesWritten += req.data.length;
         this.reply(encodeWriteAck());

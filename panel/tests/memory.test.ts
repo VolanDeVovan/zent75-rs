@@ -23,6 +23,8 @@ function randomImages(seed: number, withAdvanced = true): Images {
   }
   // booleans are stored as exactly 0 / 1
   for (const n of ["rgb_enable", "cap_enable", "rgb_fn_enable", "win_lock_state", "auto_calib_enable"] as RegionName[]) images[n]![0] &= 1;
+  // hold codes above 1000 are refused by the encoder: keep them negative or below 512
+  for (const n of ["hold_code", "hold_code_fn"] as RegionName[]) for (let i = 1; i < images[n]!.length; i += 2) images[n]![i] &= 0x81;
   return images;
 }
 
@@ -56,6 +58,12 @@ describe("memory map", () => {
     expect(a("auto_calib_enable")).toEqual([0x80080c71, 1]);
     expect(a("bind_key_setting")).toEqual([0x80080d00, 48 * 83]);
     expect(a("bind_key_mode")).toEqual([0x80081de0, 83]);
+    // not used by the vendor driver (firmware/core/src/config.rs b1 / b2)
+    expect(a("custom_switch")).toEqual([0x80070390, 1024]);
+    expect(a("hold_code")).toEqual([0x80080000, 166]);
+    expect(a("hold_code_fn")).toEqual([0x800800b0, 166]);
+    expect(a("mod_mask")).toEqual([0x80080790, 83]);
+    expect(a("mod_mask_fn")).toEqual([0x800807e8, 83]);
   });
 
   it("regions do not overlap", () => {
