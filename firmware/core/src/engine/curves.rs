@@ -19,8 +19,16 @@ const CUSTOM_STRIDE: usize = 0x100;
 /// Most points a curve may have (stock validation of the custom records).
 const MAX_POINTS: usize = 88;
 
+/// `f` positions per lookup bucket (speeds the segment search up to a few compares).
+const BUCKET_SHIFT: u32 = 5;
+const BUCKETS: usize = (TABLE_LEN >> BUCKET_SHIFT) + 1;
+
 pub struct Curves {
     tpl: [[i16; MAX_POINTS]; TYPES],
+    /// Height (µm) at each template point.
+    hts: [[i16; MAX_POINTS]; TYPES],
+    /// Last template point `≤ t0 + 32·j` per bucket j.
+    bucket: [[u8; BUCKETS]; TYPES],
     n: [u8; TYPES],
     /// First template value per type (`0x91E74`).
     pub t0: [i32; TYPES],
@@ -63,6 +71,8 @@ impl Curves {
         let t0 = padded(&TEMPLATE_0);
         Self {
             tpl: [t0, padded(&TEMPLATE_1), padded(&TEMPLATE_2), padded(&TEMPLATE_3), t0, t0, t0, t0],
+            hts: [[0; MAX_POINTS]; TYPES],
+            bucket: [[0; BUCKETS]; TYPES],
             n: [71, 70, 71, 78, 71, 71, 71, 71],
             t0: [-12, -11, -7, -10, -12, -12, -12, -12],
             f10: [2626, 2625, 2622, 2621, 2626, 2626, 2626, 2626],
@@ -96,6 +106,7 @@ impl Curves {
             }
             self.max_travel[t] = max;
             self.t0[t] = self.tpl[t][0] as i32;
+            self.index(t);
             if !used[t] {
                 continue;
             }
@@ -107,6 +118,22 @@ impl Curves {
                 }
             }
             self.f10[t] = if cnt == 0 { 0xA4C } else { sum / cnt };
+        }
+    }
+
+    /// Point heights and the bucket index of type `t`.
+    fn index(&mut self, t: usize) {
+        let n = self.n[t] as usize;
+        let max = self.max_travel[t];
+        let x = |i: usize| if i == n - 1 { max } else { -50 + 50 * i as i32 };
+        for i in 0..n {
+            self.hts[t][i] = (x(n - 1) - x(i)) as u16 as i16;
+        }
+        let t0 = self.t0[t];
+        let tpl = &self.tpl[t][..n];
+        for j in 0..BUCKETS {
+            let f = t0 + ((j as i32) << BUCKET_SHIFT);
+            self.bucket[t][j] = tpl.partition_point(|&v| v as i32 <= f).saturating_sub(1) as u8;
         }
     }
 
@@ -126,21 +153,26 @@ impl Curves {
     }
 
     /// Stock table entry at position `f` (`t0 ≤ f < t0 + TABLE_LEN`).
+    #[inline]
     fn at(&self, t: usize, f: i32) -> i32 {
         let n = self.n[t] as usize;
-        let tpl = &self.tpl[t][..n];
-        let max = self.max_travel[t];
-        let x = |i: usize| if i == n - 1 { max } else { -50 + 50 * i as i32 };
-        let h = |i: usize| (x(n - 1) - x(i)) as u16 as i16 as i32;
-        // last point with tpl[i] <= f (a later duplicate overwrites an earlier one in stock)
-        let i = tpl.partition_point(|&v| v as i32 <= f);
-        if i == 0 {
-            return 0;
+        let tpl = &self.tpl[t];
+        let hts = &self.hts[t];
+        let k = ((f - self.t0[t]) >> BUCKET_SHIFT) as usize;
+        let mut i = match self.bucket[t].get(k) {
+            Some(&b) => b as usize,
+            None => return 0,
+        };
+        if (tpl[i] as i32) > f {
+            return 0; // before the first point (unreachable: f ≥ t0)
         }
-        let i = i - 1;
+        // last point with tpl[i] <= f (a later duplicate overwrites an earlier one in stock)
+        while i + 1 < n && tpl[i + 1] as i32 <= f {
+            i += 1;
+        }
         let f1 = tpl[i] as i32;
         if f1 == f {
-            return h(i);
+            return hts[i] as i32;
         }
         if i + 1 >= n {
             return 0; // past the last point: never written (zero-filled table)
@@ -150,7 +182,7 @@ impl Curves {
         while j + 1 < n && tpl[j + 1] as i32 == f2 {
             j += 1;
         }
-        (((f - f1) * h(j) + (f2 - f) * h(i)) / (f2 - f1)) as i16 as i32
+        (((f - f1) * hts[j] as i32 + (f2 - f) * hts[i] as i32) / (f2 - f1)) as i16 as i32
     }
 }
 
