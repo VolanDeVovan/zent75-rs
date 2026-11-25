@@ -41,17 +41,20 @@ class Result:
         return "\n".join(self.lines)
 
 
-def gate(path: str, ms: float = 1200.0, backup: str | None = None, banner: str | None = None,
+def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None = None,
          strict_pinmux: bool = False, align_check: bool = True, trace=None, verbose=False,
          enter_bootloader_ms: float | None = None, show_mmio: bool = True,
-         reset_flags: int = 0, expect_bootloader: bool = False) -> Result:
-    img = Image.load(path)
+         reset_flags: int = 0, expect_bootloader: bool = False, preload=None) -> Result:
+    """Run the gate on an ELF/UF2 path (or an `Image`) and return the `Result`."""
+    img = path if isinstance(path, Image) else Image.load(path)
     names = RegNames()
     m = Machine(img, names if names.available else None, align_check=align_check, trace=trace,
                 verbose=verbose, reset_flags=reset_flags)
     m.load_image()
     if backup:
         m.preload_flash(config_banks_from_backup(backup))
+    if preload:
+        m.preload_flash(preload)
     reason = "not-started"
     hook_target = None
     if m.boot():
