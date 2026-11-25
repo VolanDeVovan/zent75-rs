@@ -17,3 +17,7 @@ __pycache__/
 
 # local RE workspace (vendor code derivatives, never commit)
 /re-work/
+
+# never published: stock vendor images and the owner's device backups
+/firmware/vendor/*.uf2
+/backups/

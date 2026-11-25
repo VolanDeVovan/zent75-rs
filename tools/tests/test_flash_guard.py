@@ -22,10 +22,13 @@ def test_guard_constants_are_pinned():
     assert fu.APP_REGION == (0x80040000, 0x80070000)
 
 
-def test_vendor_images_pass():
-    for name in ("0.0.18.uf2", "0.0.9.uf2"):
-        with open(os.path.join(ROOT, "firmware", "vendor", name), "rb") as f:
-            assert fu.check_uf2(f.read()) > 0
+@pytest.mark.parametrize("name", ["0.0.18.uf2", "0.0.9.uf2"])
+def test_vendor_images_pass(name):
+    path = os.path.join(ROOT, "firmware", "vendor", name)
+    if not os.path.exists(path):
+        pytest.skip(f"stock image not present (see firmware/vendor/README.md): {name}")
+    with open(path, "rb") as f:
+        assert fu.check_uf2(f.read()) > 0
 
 
 def test_app_region_edges_pass():
