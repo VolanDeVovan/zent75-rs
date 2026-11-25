@@ -26,7 +26,9 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
-use embassy_usb::driver::{Endpoint as _, EndpointAddress, EndpointIn, EndpointOut};
+use embassy_usb::driver::{
+    EndpointAddress, EndpointAllocError, EndpointIn, EndpointOut, EndpointType, Event, Unsupported,
+};
 use embassy_usb::{Builder, Handler};
 use hpm_hal::pac;
 use hpm_hal::peripherals;
@@ -62,7 +64,7 @@ fn USB0() {
     plic::complete(hpm_hal::interrupt::USB0);
 }
 
-type Driver = UsbDriver<'static, peripherals::USB0>;
+type Driver = AlwaysPowered<UsbDriver<'static, peripherals::USB0>>;
 type EpIn = <Driver as embassy_usb::driver::Driver<'static>>::EndpointIn;
 type EpOut = <Driver as embassy_usb::driver::Driver<'static>>::EndpointOut;
 
@@ -87,6 +89,99 @@ const INTERFACES: [InterfaceDef; 4] = [
 
 fn hid_descriptor(bcd: u16, report_len: usize) -> [u8; 7] {
     [bcd as u8, (bcd >> 8) as u8, 0x00, 0x01, 0x22, report_len as u8, (report_len >> 8) as u8]
+}
+
+// ------------------------------------------------------------------ VBUS
+
+/// The keyboard is bus-powered and has no VBUS sense pin (VBUS/session valid are forced in
+/// PHY_CTRL0), so — like stock CherryUSB — power is simply always present.
+///
+/// hpm-hal's bus instead reports `OTGSC.ASV`: it reads 0 at the first `poll` (the override
+/// has not settled yet) and drops again when `Bus::enable` sets OTGSC.VD (VBUS discharge).
+/// embassy-usb answers `PowerRemoved` with `Bus::disable`, which resets the controller and
+/// the PHY — after which ASV never comes back and the board stays off the bus (seen on
+/// hardware with bring-up probes 7 and 8). This wrapper reports `PowerDetected` once and
+/// drops every later power event.
+struct AlwaysPowered<D>(D);
+
+impl<'a, D: embassy_usb::driver::Driver<'a>> embassy_usb::driver::Driver<'a> for AlwaysPowered<D> {
+    type EndpointOut = D::EndpointOut;
+    type EndpointIn = D::EndpointIn;
+    type ControlPipe = D::ControlPipe;
+    type Bus = AlwaysPoweredBus<D::Bus>;
+
+    fn alloc_endpoint_out(
+        &mut self,
+        ep_type: EndpointType,
+        ep_addr: Option<EndpointAddress>,
+        max_packet_size: u16,
+        interval_ms: u8,
+    ) -> Result<Self::EndpointOut, EndpointAllocError> {
+        self.0.alloc_endpoint_out(ep_type, ep_addr, max_packet_size, interval_ms)
+    }
+
+    fn alloc_endpoint_in(
+        &mut self,
+        ep_type: EndpointType,
+        ep_addr: Option<EndpointAddress>,
+        max_packet_size: u16,
+        interval_ms: u8,
+    ) -> Result<Self::EndpointIn, EndpointAllocError> {
+        self.0.alloc_endpoint_in(ep_type, ep_addr, max_packet_size, interval_ms)
+    }
+
+    fn start(self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
+        let (bus, pipe) = self.0.start(control_max_packet_size);
+        (AlwaysPoweredBus { bus, powered: false }, pipe)
+    }
+}
+
+struct AlwaysPoweredBus<B> {
+    bus: B,
+    powered: bool,
+}
+
+impl<B: embassy_usb::driver::Bus> embassy_usb::driver::Bus for AlwaysPoweredBus<B> {
+    async fn enable(&mut self) {
+        self.bus.enable().await
+    }
+
+    async fn disable(&mut self) {
+        self.bus.disable().await
+    }
+
+    async fn poll(&mut self) -> Event {
+        if !self.powered {
+            self.powered = true;
+            return Event::PowerDetected;
+        }
+        loop {
+            match self.bus.poll().await {
+                Event::PowerDetected | Event::PowerRemoved => continue,
+                e => return e,
+            }
+        }
+    }
+
+    fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
+        self.bus.endpoint_set_enabled(ep_addr, enabled)
+    }
+
+    fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
+        self.bus.endpoint_set_stalled(ep_addr, stalled)
+    }
+
+    fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
+        self.bus.endpoint_is_stalled(ep_addr)
+    }
+
+    fn force_reset(&mut self) -> Result<(), Unsupported> {
+        self.bus.force_reset()
+    }
+
+    async fn remote_wakeup(&mut self) -> Result<(), Unsupported> {
+        self.bus.remote_wakeup().await
+    }
 }
 
 // ------------------------------------------------------------------ control requests
@@ -222,6 +317,17 @@ async fn usb_run(mut dev: embassy_usb::UsbDevice<'static, Driver>) -> ! {
     dev.run().await
 }
 
+/// Wait until the host configured us and `ep` is open. hpm-hal opens the endpoints on
+/// SET_CONFIGURATION without waking tasks parked in `wait_enabled` (only a bus reset wakes
+/// them), so a task that got there first would sleep forever — the keyboard enumerated but
+/// sent nothing and ignored vendor frames. `CONFIGURED` is set after the endpoints are open.
+async fn endpoint_ready(ep: &mut impl embassy_usb::driver::Endpoint) {
+    while !CONFIGURED.load(Ordering::Relaxed) {
+        Timer::after_millis(1).await;
+    }
+    ep.wait_enabled().await;
+}
+
 /// One input report: up to 16 bytes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Report {
@@ -242,7 +348,7 @@ impl Report {
 async fn send_on_change(mut ep: EpIn, signal: &HidSignal, current: impl Fn(&HidReports) -> Report) -> ! {
     let mut sent = None;
     loop {
-        ep.wait_enabled().await;
+        endpoint_ready(&mut ep).await;
         signal.wait().await;
         loop {
             let r = kb::with(|kb| current(kb.hid()));
@@ -289,7 +395,7 @@ async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn, store: StoreRef) 
     let mut rx = [0u8; REPORT_SIZE];
     let mut reply = [0u8; REPORT_SIZE];
     loop {
-        ep.wait_enabled().await;
+        endpoint_ready(&mut ep).await;
         let n = match ep.read(&mut rx).await {
             Ok(n) => n,
             Err(_) => continue,
@@ -331,7 +437,7 @@ pub fn start(
     static EP_STATE: EndpointState = EndpointState::new();
 
     crate::system::mark_started(crate::system::STARTED_USB);
-    let driver = UsbDriver::new(usb0, Irqs, dm, dp, hpm_hal::usb::Config::default(), &EP_STATE);
+    let driver = AlwaysPowered(UsbDriver::new(usb0, Irqs, dm, dp, hpm_hal::usb::Config::default(), &EP_STATE));
     plic::set_priority(hpm_hal::interrupt::USB0, plic::PRIO_USB);
 
     let mut config = embassy_usb::Config::new(VID, PID);
