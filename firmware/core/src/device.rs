@@ -201,6 +201,10 @@ impl Keyboard {
             return;
         }
         self.switch_cooldown = SWITCH_COOLDOWN_SCANS;
+        if ignore_cooldown {
+            // `BE C0` also freezes the reports for 0.9 s (stock shares the key cool-down)
+            self.keys.start_cooldown();
+        }
         self.pending.switch_to = Some(p);
     }
 
