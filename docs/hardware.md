@@ -36,13 +36,16 @@ The stock app copies most of its code into ILM at boot through a SEGGER runtime-
 
 ## Peripherals used by the stock firmware
 
+Register-level detail (values, init order, interrupt priorities): `re-peripherals.md`.
+
 | Peripheral | Base | Use |
 |---|---|---|
-| ADC0 / ADC1 | `0xF3080000` / `0xF3084000` | hall sensors |
-| PWM1 | `0xF031C000` | **analog-mux address** (outputs P4–P7) |
-| PWM0 + TRGM0 | `0xF0318000` / `0xF033C000` | ADC trigger (`TRGM0+0x180/0x184 = 0x30`) |
-| GPTMR1 | `0xF0004000` | per-step scan tick / processing interrupt |
-| SPI1 + HDMA + DMAMUX | `0xF0074000` / `0xF00C8000` / `0xF00C4000` | WS2812 RGB stream |
+| ADC0 / ADC1 | `0xF3080000` / `0xF3084000` | hall sensors (ADC0 ch 1,3,5,7 · ADC1 ch 2,4,6,11) |
+| PWM1 | `0xF031C000` | **analog-mux address** (outputs P4–P7 on PY00–PY03) |
+| PWM0 + TRGM0 | `0xF0318000` / `0xF033C000` | ADC trigger: CH8REF → `ADC0_STRGI`/`ADC1_STRGI` (`TRGM0.trgocfg[32/33] = 0x30`) |
+| GPTMR1 | `0xF0004000` | deferred "software interrupt": the ADC ISRs pulse it, its reload IRQ (lower priority) runs the per-step key processing |
+| GPTMR0 | `0xF0000000` | free-running µs timebase (no IRQ) |
+| SPI1 + HDMA + DMAMUX | `0xF0074000` / `0xF00C8000` / `0xF00C4000` | WS2812 RGB stream, MOSI = **PA29** |
 | USB0 | `0xF300C000` | all HID interfaces |
 | UART0 | `0xF0040000` | debug console (`[I/USB] …`) |
 | IOC / PIOC | `0xF4040000` / `0xF4118000` | pin mux |
@@ -61,10 +64,11 @@ splits them across the two ADCs, each running a 16-conversion hardware sequence 
 | ADC | Channels |
 |---|---|
 | ADC0 | 1, 3, 5, 7 |
-| ADC1 | 0, 2, 4, 6 |
+| ADC1 | **2, 4, 6, 11** (the MMIO trace of 0.0.18 settles it; an older reading of the channel table said 0, 2, 4, 6) |
 
-Within a step the 8 values are interleaved `[ADC0 ch1, ADC1 ch0, ADC0 ch3, ADC1 ch2, ADC0 ch5,
-ADC1 ch4, ADC0 ch7, ADC1 ch6]` (`FUN_ram_00013314`), so **scan slot = step × 8 + position**.
+Within a step the 8 values are interleaved `[ADC0 ch1, ADC1 ch2, ADC0 ch3, ADC1 ch4, ADC0 ch5,
+ADC1 ch6, ADC0 ch7, ADC1 ch11]` (`FUN_ram_00013314`), so **scan slot = step × 8 + position**.
+IN1–IN5 = PB09–PB13, IN11 = PB08; IN6/IN7 are PB00/PB01 on this package (which is which is open).
 Stage-0 reads all 8 inputs on ADC0 alone with channels `1,2,3,4,5,6,7,11`.
 
 **Mux address.** Pads **PY00–PY03** = mux address bits 0–3. The app routes them to
@@ -106,18 +110,29 @@ key 40-47: 49 50 58 66 42 86 62 54
 
 **Levels.** Rest ≈ 30000 counts, bottom-out ≈ 18000 (16-bit result; ≈ 7.5 µm/count over ~3.4 mm).
 
-**Timing.** ADC DMA lands in `0x80092260` (ADC0) / `0x80092160` (ADC1); the per-ADC interrupts
-(`FUN_ram_000002A0` / `FUN_ram_000003A6`) count steps 0…10, mark the step ready and pulse GPTMR1;
-the GPTMR1 handler (`FUN_ram_0000057A`) runs the per-step processing `FUN_ram_00007A88(step)`.
-8000 full scans/s.
+**Timing.** PWM period 20 000 AHB ticks (160 MHz) = 125 µs; mux step every 1818 ticks
+(11.36 µs); ADC trigger 320 ticks (2 µs) after each step boundary. ADC clock = AHB / 4 = 40 MHz
+(`conv_cfg1 = 0x153`, 16-bit), so one 16-conversion sequence takes ≈ 10 µs — the last
+conversions of a step end close to the next mux switch (worth keeping in mind for the
+one-step-offset question below). ADC DMA lands in DLM `0x00092260` (ADC0) / `0x00092160` (ADC1),
+16-word circular buffers; the per-ADC `seq_cvc` interrupts (`FUN_ram_000002A0` /
+`FUN_ram_000003A6`, PLIC prio 5) count steps 0…10, mark the step ready and pulse GPTMR1; the
+GPTMR1 handler (`FUN_ram_0000057A`, prio 2) runs the per-step processing
+`FUN_ram_00007A88(step)`. 8000 full scans/s.
+
+Our firmware (`firmware/app/src/scan.rs`) programs the same registers, but works out the step
+from the PWM0 counter at interrupt time instead of counting, and runs `Keyboard::scan` once per
+complete 88-sample frame. The step ↔ sample association is one constant there (`STEP_OFFSET`).
 
 ## RGB
 
-**85 WS2812-class LEDs on SPI1**, 12 MHz, 16-bit frames, one SPI word per LED data bit (`1` →
-`0xFFC0`), streamed by HDMA from a 4082-byte buffer (85 × 24 × 2 + 2) (`FUN_ram_00010F66` init,
-`FUN_ram_00013D78` refresh). The chain snakes from the bottom-left upward; Space owns three LEDs.
-Key → LED table: `KEY_TO_LED` in `panel/src/protocol/layout.ts`. The SPI1 MOSI pad is not pinned
-down yet (read it from the IOC setup when porting).
+**85 WS2812-class LEDs on SPI1 MOSI = PA29** (`IOC PA29 = 5`; no SCLK/CS pads muxed), 12 MHz SCLK
+(24 MHz source ÷ 2 — stock never sets the SPI1 clock, our firmware sets 24 MHz explicitly),
+16-bit frames, one SPI word per LED data bit (`1` → `0xFFC0`, `0` → `0xE000`, 1.333 µs per bit),
+GRB byte order, streamed by HDMA ch0 (DMAMUX request `0x2B`) from a 4082-byte buffer
+(85 × 24 × 2 + 2) (`FUN_ram_00010F66` init, `FUN_ram_00013D78` refresh). The chain snakes from the
+bottom-left upward; Space owns three LEDs. Key → LED table: `KEY_TO_LED` in
+`panel/src/protocol/layout.ts`. No LED power-enable GPIO exists.
 
 ## USB
 
@@ -127,11 +142,13 @@ Device `36B0:357E`, "Wob Lab" / "ZENT  75 HE ", CherryUSB, High Speed. All inter
 | If | Class | Endpoints | Role |
 |---|---|---|---|
 | 0 | HID boot keyboard | `0x81` IN, 64 B | keyboard |
-| 1 | HID | `0x83` IN, 3 B | consumer / system |
+| 1 | HID | `0x83` IN, 3 B | consumer (24-usage bitmap; no System Control collection) |
 | 2 | HID vendor, usage page `0xFF60`, usage `0x61` | `0x82` IN + `0x03` OUT, 1024 B | configurator protocol (`protocol.md`) |
 | 3 | HID mouse | `0x84` IN, 3 B | mouse-button keycodes 251–255 |
 
-Descriptors: device @ `0x80042164`, configuration @ `0x80042176`.
+Descriptors: device @ `0x80042164`, configuration @ `0x80042176`; byte dumps and the four report
+descriptors in `re-peripherals.md` §5. The USB serial string is the fixed `"20240728"`, not the
+chip UID.
 
 ## Serial number
 
