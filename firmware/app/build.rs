@@ -1,4 +1,4 @@
 fn main() {
     println!("cargo:rerun-if-changed=memory.x");
-    println!("cargo:rerun-if-changed=link-app.x");
+    println!("cargo:rerun-if-changed=zent-link.x");
 }

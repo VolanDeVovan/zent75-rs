@@ -24,12 +24,9 @@ rustflags = [
     "-C",
     "link-arg=-Tdevice.x",     # __INTERRUPTS, peripheral interrupt names (hpm-metapac)
     "-C",
-    # Must precede hpm-link.x: it reassigns `_stext` to ORIGIN+4, and hpm-link.x
-    # evaluates `.text _stext :` at parse time, so the new value has to be in
-    # scope first. (The `.app_signature` INSERT itself is order-independent.)
-    "link-arg=-Tlink-app.x",   # our TinyUF2 boot signature at 0x80040000, entry at +4
-    "-C",
-    "link-arg=-Thpm-link.x",   # hpm-riscv-rt sections
+    # Our own copy of hpm-riscv-rt's hpm-link.x: TinyUF2 boot signature at 0x80040000, entry at
+    # +4, and all code/rodata in ILM/DLM so NOR writes never race XIP fetches (see the file).
+    "link-arg=-Tzent-link.x",
     "-C",
     "link-arg=-nmagic",
 ]

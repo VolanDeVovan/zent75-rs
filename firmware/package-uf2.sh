@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the ZENT75-HE firmware skeleton and package it as a UF2 the stock
-# TinyUF2 bootloader would accept.
+# Build the ZENT75-HE firmware and package it as a UF2 the stock TinyUF2
+# bootloader accepts.
 #
 #   cargo build --release      -> ELF for riscv32imafc
 #   llvm-objcopy -O binary      -> flat .bin of the flash image (app @ 0x80040000)
@@ -41,6 +41,26 @@ OBJCOPY="$(find_objcopy)"
 
 echo ">> $OBJCOPY -O binary $ELF $BIN"
 "$OBJCOPY" -O binary "$ELF" "$BIN"
+
+# Size report. zent-link.x already asserts the layout; this prints the budget.
+SIZE="$(dirname "$OBJCOPY")/llvm-size"
+[ -x "$SIZE" ] || SIZE="$(command -v llvm-size || true)"
+if [ -n "$SIZE" ]; then
+    "$SIZE" -A "$ELF" | awk '
+        $1==".text" {xip=$2} $1==".fast" {ilm=$2} $1==".data" {data=$2}
+        $1==".bss" || $1==".noncacheable.bss" || $1==".fast.bss" {bss+=$2}
+        END {
+            printf(">> size: XIP stub %d B | ILM code %d / 131072 B (%d%%) | DLM data+rodata %d + bss %d = %d / 131072 B (%d%%)\n",
+                   xip, ilm, ilm*100/131072, data, bss, data+bss, (data+bss)*100/131072)
+            if (xip > 1024) { print "ERROR: code in XIP .text (must run from ILM)"; exit 1 }
+        }'
+fi
+binsize=$(stat -c %s "$BIN")
+echo ">> image: $binsize B of 196608 B app region ($((binsize * 100 / 196608))%)"
+if [ "$binsize" -gt 196608 ]; then
+    echo "ERROR: image larger than the 192 KB application region" >&2
+    exit 1
+fi
 
 # Sanity check: the first 32-bit word must be the TinyUF2 boot signature.
 word0="$(od -An -tx4 -N4 "$BIN" | tr -d ' ')"
