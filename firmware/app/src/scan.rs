@@ -138,7 +138,7 @@ fn cycles() -> u32 {
 
 // ------------------------------------------------------------------ init
 
-/// Configure pins, ADCs, PWM0/PWM1/TRGM0 and GPTMR1, then start. Call after `kb_init`.
+/// Configure pins, ADCs, PWM0/PWM1/TRGM0 and GPTMR1, then start. Call after `boot_keyboard`.
 pub fn start(adc0: hpm_hal::Peri<'static, hpm_hal::peripherals::ADC0>, adc1: hpm_hal::Peri<'static, hpm_hal::peripherals::ADC1>) {
     use hpm_hal::sysctl::clock_add_to_group;
     for r in [pac::resources::ADC0, pac::resources::ADC1, pac::resources::MOT0, pac::resources::TMR1] {

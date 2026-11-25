@@ -23,7 +23,7 @@ use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 use embassy_time::{Instant, Timer};
 use hpm_hal as hal;
-use zent_core::device::{Keyboard, SystemAction};
+use zent_core::device::SystemAction;
 use zent_core::layout::LED_COUNT;
 
 use crate::shared::{with_kb, STORAGE};
@@ -149,18 +149,18 @@ async fn health_task() {
     }
 }
 
-/// Load the config banks and install the keyboard. Not async on purpose: keeps the ~10 KB
-/// `Keyboard` off the main task's future.
+/// Load the config banks into the static keyboard (in place, see `shared::KB`).
 #[inline(never)]
 fn boot_keyboard(uid: [u8; 16]) {
-    let mut kb = Keyboard::new(uid);
-    kb.boot(&mut *STORAGE.borrow_mut());
-    log!(
-        "config: active profile {}, defaults written for empty slots: {}",
-        kb.active_profile(),
-        STORAGE.borrow_mut().dirty()
-    );
-    shared::kb_init(kb);
+    shared::kb_boot(|kb| {
+        kb.set_serial(uid);
+        kb.boot(&mut *STORAGE.borrow_mut());
+        log!(
+            "config: active profile {}, defaults written for empty slots: {}",
+            kb.active_profile(),
+            STORAGE.borrow_mut().dirty()
+        );
+    });
 }
 
 #[embassy_executor::main(entry = "hpm_hal::entry")]

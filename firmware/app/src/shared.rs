@@ -15,7 +15,6 @@
 //! capture, so taking the lock cannot corrupt samples. It is *not* a global critical section.
 
 use core::cell::UnsafeCell;
-use core::mem::MaybeUninit;
 
 use hpm_hal::interrupt::{InterruptExt, Priority};
 use hpm_hal::pac;
@@ -27,14 +26,18 @@ pub const PRIO_ADC: Priority = Priority::P7;
 pub const PRIO_USB: Priority = Priority::P3;
 pub const PRIO_SCAN: Priority = Priority::P2;
 
-struct KbCell(UnsafeCell<MaybeUninit<Keyboard>>);
+struct KbCell(UnsafeCell<Keyboard>);
 // SAFETY: access is serialised by the PLIC-threshold protocol described above.
 unsafe impl Sync for KbCell {}
-static KB: KbCell = KbCell(UnsafeCell::new(MaybeUninit::uninit()));
+/// Initialised at link time (`Keyboard::new` is `const`): the ~40 KB struct is copied into DLM
+/// by the startup code with `.data` and is never built on the 16 KB stack.
+static KB: KbCell = KbCell(UnsafeCell::new(Keyboard::new([0; 16])));
 
-/// Install the keyboard. Call once, before the scan interrupt is enabled.
-pub fn kb_init(kb: Keyboard) {
-    unsafe { (*KB.0.get()).write(kb) };
+/// Set up the keyboard (serial, config banks). Call once, before the scan interrupt is
+/// enabled — nothing else touches `KB` yet, so no lock is needed.
+pub fn kb_boot<R>(f: impl FnOnce(&mut Keyboard) -> R) -> R {
+    // SAFETY: single caller before GPTMR1 / USB tasks exist.
+    f(unsafe { &mut *KB.0.get() })
 }
 
 /// Thread-mode access: masks the scan-processing interrupt for the duration of `f`.
@@ -51,7 +54,7 @@ pub fn with_kb<R>(f: impl FnOnce(&mut Keyboard) -> R) -> R {
     });
     // SAFETY: the scan ISR (the only other user) cannot run while the threshold is ≥ PRIO_SCAN,
     // and thread-mode callers never nest (with_kb is not re-entered from `f`).
-    let r = f(unsafe { (*KB.0.get()).assume_init_mut() });
+    let r = f(unsafe { &mut *KB.0.get() });
     plic.threshold().write(|w| w.set_threshold(prev));
     r
 }
@@ -61,7 +64,7 @@ pub fn with_kb<R>(f: impl FnOnce(&mut Keyboard) -> R) -> R {
 /// # Safety
 /// Only from the GPTMR1 handler.
 pub unsafe fn kb_from_scan_isr() -> &'static mut Keyboard {
-    (*KB.0.get()).assume_init_mut()
+    &mut *KB.0.get()
 }
 
 /// Thread-mode-only cell (RefCell semantics without `Sync` requirements on the executor).
