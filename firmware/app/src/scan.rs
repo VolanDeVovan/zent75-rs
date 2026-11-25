@@ -110,12 +110,13 @@ pub struct Stats {
     pub proc_cyc_max: AtomicU32,
     pub proc_cyc_sum: AtomicU32,
     pub proc_n: AtomicU32,
-    /// Processing cycles since the last once-per-second read (BE FD busy word).
-    pub sec_cyc: AtomicU32,
     pub adc_cyc_max: AtomicU32,
     pub seq_min: AtomicU32,
     pub seq_max: AtomicU32,
 }
+/// Processing cycles since the last once-per-second read (BE FD busy word). Not in [`Stats`]:
+/// the emu gate reads that struct by layout.
+pub static SEC_CYC: AtomicU32 = AtomicU32::new(0);
 pub static STATS: Stats = Stats {
     scans: AtomicU32::new(0),
     dropped: AtomicU32::new(0),
@@ -126,7 +127,6 @@ pub static STATS: Stats = Stats {
     proc_cyc_max: AtomicU32::new(0),
     proc_cyc_sum: AtomicU32::new(0),
     proc_n: AtomicU32::new(0),
-    sec_cyc: AtomicU32::new(0),
     adc_cyc_max: AtomicU32::new(0),
     seq_min: AtomicU32::new(u32::MAX),
     seq_max: AtomicU32::new(0),
@@ -343,7 +343,7 @@ unsafe fn ADC0() {
         // executor; the scan then stops visibly (console `scan 0/s`, `miss` counting up).
         if seen < STEP_COUNT as u32 - 1 {
             stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
-            hpm_hal::interrupt::ADC0.complete();
+            shared::plic_complete(hpm_hal::interrupt::ADC0);
             return;
         }
         READY_IDX.store(w as u32, Ordering::Relaxed);
@@ -352,7 +352,7 @@ unsafe fn ADC0() {
         kick_processing();
     }
     stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
-    hpm_hal::interrupt::ADC0.complete();
+    shared::plic_complete(hpm_hal::interrupt::ADC0);
 }
 
 /// Deferred frame processing (stock's GPTMR1 trick). Preemptible by ADC0 and USB0.
@@ -366,7 +366,7 @@ unsafe fn GPTMR1() {
     // cannot nest into itself. Guard anyway (cheap): a nested entry just returns, the running
     // instance loops until it has consumed the newest frame.
     if IN_PROCESS {
-        hpm_hal::interrupt::GPTMR1.complete();
+        shared::plic_complete(hpm_hal::interrupt::GPTMR1);
         return;
     }
     IN_PROCESS = true;
@@ -397,7 +397,7 @@ unsafe fn GPTMR1() {
         stat_max(&STATS.proc_cyc_max, dc);
         STATS.proc_cyc_sum.fetch_add(dc, Ordering::Relaxed);
         STATS.proc_n.fetch_add(1, Ordering::Relaxed);
-        STATS.sec_cyc.fetch_add(dc, Ordering::Relaxed);
+        SEC_CYC.fetch_add(dc, Ordering::Relaxed);
         STATS.scans.fetch_add(1, Ordering::Relaxed);
         if gen != LAST_GEN {
             LAST_GEN = gen;
@@ -409,7 +409,7 @@ unsafe fn GPTMR1() {
 
     riscv::interrupt::disable();
     IN_PROCESS = false;
-    hpm_hal::interrupt::GPTMR1.complete();
+    shared::plic_complete(hpm_hal::interrupt::GPTMR1);
 }
 
 /// Snapshot of the latest published frame (for diagnostics).

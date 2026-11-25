@@ -38,9 +38,24 @@ use zent_core::protocol::REPORT_SIZE;
 use crate::shared::{self, with_kb, STORAGE};
 use crate::{log, scan};
 
-hpm_hal::bind_interrupts!(struct Irqs {
-    USB0 => hpm_hal::usb::InterruptHandler<peripherals::USB0>;
-});
+/// USB0 binding. Not `hpm_hal::bind_interrupts!`: its handler completes through hpm-hal's
+/// `complete()`, a read-modify-write of the PLIC claim register — the read *claims* any
+/// higher-priority pending source (ADC0), which is then never serviced or completed and
+/// stops the scan for good. See `shared::plic_complete`.
+#[derive(Copy, Clone)]
+struct Irqs;
+unsafe impl hpm_hal::interrupt::typelevel::Binding<hpm_hal::interrupt::typelevel::USB0, hpm_hal::usb::InterruptHandler<peripherals::USB0>>
+    for Irqs
+{
+}
+
+#[allow(non_snake_case)]
+#[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::USB0)]
+unsafe fn USB0() {
+    use hpm_hal::interrupt::typelevel::Handler;
+    <hpm_hal::usb::InterruptHandler<peripherals::USB0> as Handler<hpm_hal::interrupt::typelevel::USB0>>::on_interrupt();
+    shared::plic_complete(hpm_hal::interrupt::USB0);
+}
 
 type Driver = UsbDriver<'static, peripherals::USB0>;
 type EpIn = <Driver as embassy_usb::driver::Driver<'static>>::EndpointIn;

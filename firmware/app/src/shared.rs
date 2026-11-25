@@ -92,6 +92,16 @@ pub fn setup_plic() {
     hpm_hal::interrupt::HDMA.disable();
 }
 
+/// Complete (end of service) a PLIC source with a plain *write* of the claim/complete register.
+/// Never use hpm-hal's `InterruptExt::complete()`: it is a read-modify-write, and reading that
+/// register claims the highest-priority pending source — e.g. finishing GPTMR1 (prio 2) while
+/// an ADC0 step (prio 7) is pending silently claims ADC0, which is then never serviced or
+/// completed, so the PLIC masks every source ≤ 7 forever and the scan stops.
+#[inline(always)]
+pub fn plic_complete(irq: impl InterruptExt) {
+    pac::PLIC.targetconfig(0).claim().write(|w| w.set_interrupt_id(irq.number() as u16));
+}
+
 /// Set a PLIC source priority. Not `InterruptExt::set_priority`: hpm-hal 620f58d passes the IRQ
 /// number to metapac's `PLIC.priority(n)`, whose index 0 is *source 1* (register 0x04), so it
 /// programs the priority of the next source (ADC0 → ADC1's register) and leaves ours at its
