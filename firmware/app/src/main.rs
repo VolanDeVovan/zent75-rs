@@ -215,7 +215,7 @@ async fn health_task() {
         let avg_us10 = sum / n * 10 / cpu_mhz;
         let busy_pct = (sum / n + 11 * amax) * 100 / (125 * cpu_mhz);
         log!(
-            "scan {}/s avg {}.{} us max {} us/scan, adc isr max {} cyc, cpu ~{}% | seq {}..{} ticks | drop {} miss {} badch {} cflct {} adc1late {}",
+            "scan {}/s avg {}.{} us max {} us/scan, adc isr max {} cyc, cpu ~{}% | seq {}..{} ticks | drop {} miss {} late {} badch {} cflct {} adc1late {}",
             (scans - last_scans) / 5,
             avg_us10 / 10,
             avg_us10 % 10,
@@ -226,6 +226,7 @@ async fn health_task() {
             smax,
             s.dropped.load(Ordering::Relaxed),
             s.steps_missing.load(Ordering::Relaxed),
+            scan::LATE_STEPS.load(Ordering::Relaxed),
             s.bad_channel.load(Ordering::Relaxed),
             s.hw_conflict.load(Ordering::Relaxed),
             s.adc1_late.load(Ordering::Relaxed),

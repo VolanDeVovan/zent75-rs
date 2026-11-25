@@ -51,6 +51,13 @@ const TRIGGER_TICKS: u32 = 320;
 /// used to locate the step; anything within ±STEP_TICKS/2 of it decodes correctly. The real
 /// value is measured and logged (`seq` min/max), tune if it drifts out of the window.
 const SEQ_DONE_TICKS: u32 = 1550;
+/// Latest the capture ISR may run (ticks after its trigger) and still find this step's samples
+/// intact: the next trigger comes STEP_TICKS after ours and its first conversion lands in the
+/// DMA buffer ~96 ticks later, overwriting input 0. A later ISR (seen on hardware: up to ~2300
+/// under USB load) would store a mix of two mux steps — single-scan spikes of ~10000 counts
+/// that the engine reads as a full key press. Such a step is dropped (`late` statistic); the
+/// frame keeps that step's previous samples.
+const LATEST_TICKS: u32 = STEP_TICKS + 60;
 
 /// ADC0 then ADC1 channel per input index.
 const ADC0_CH: [u8; 4] = [1, 3, 5, 7];
@@ -172,6 +179,8 @@ pub struct Stats {
 /// Processing cycles since the last once-per-second read (BE FD busy word). Not in [`Stats`]:
 /// the emu gate reads that struct by layout.
 pub static SEC_CYC: AtomicU32 = AtomicU32::new(0);
+/// Mux steps dropped because the capture ISR ran too late ([`LATEST_TICKS`]).
+pub static LATE_STEPS: AtomicU32 = AtomicU32::new(0);
 pub static STATS: Stats = Stats {
     scans: AtomicU32::new(0),
     dropped: AtomicU32::new(0),
@@ -363,6 +372,10 @@ fn capture_step() {
     let (k, late) = decode_step(cnt);
     stat_min(&STATS.seq_min, late);
     stat_max(&STATS.seq_max, late);
+    let torn = late > LATEST_TICKS;
+    if torn {
+        LATE_STEPS.fetch_add(1, Relaxed);
+    }
 
     // Sanity: the last word of each buffer must be the last channel of the sequence.
     if ADC0_DMA.last_channel() != ADC0_CH[3] as u32 || ADC1_DMA.last_channel() != ADC1_CH[3] as u32 {
@@ -370,10 +383,12 @@ fn capture_step() {
     }
     let w = WRITE_IDX.load(Relaxed);
     let step = (k + STEP_OFFSET) % STEP_COUNT;
-    let slots = &FRAMES[w as usize & 1][step * INPUTS_PER_STEP..][..INPUTS_PER_STEP];
-    for ((pair, in0), in1) in slots.as_chunks::<2>().0.iter().zip(ADC0_DMA.inputs()).zip(ADC1_DMA.inputs()) {
-        pair[0].store(avg3(in0), Relaxed);
-        pair[1].store(avg3(in1), Relaxed);
+    if !torn {
+        let slots = &FRAMES[w as usize & 1][step * INPUTS_PER_STEP..][..INPUTS_PER_STEP];
+        for ((pair, in0), in1) in slots.as_chunks::<2>().0.iter().zip(ADC0_DMA.inputs()).zip(ADC1_DMA.inputs()) {
+            pair[0].store(avg3(in0), Relaxed);
+            pair[1].store(avg3(in1), Relaxed);
+        }
     }
     let seen = STEPS_SEEN.load(Relaxed) | 1 << k;
     STEPS_SEEN.store(seen, Relaxed);
@@ -451,7 +466,11 @@ fn process_frames() {
         let c0 = cycles();
         let gen = kb::with(|kb| {
             kb.scan(&frame);
-            kb.hid_generation()
+            let gen = kb.hid_generation();
+            if DEBUG_KEYS && gen != LAST_GEN.load(Relaxed) {
+                log_key_change(kb);
+            }
+            gen
         });
         let dc = cycles().wrapping_sub(c0);
         stat_max(&STATS.proc_cyc_max, dc);
@@ -462,6 +481,25 @@ fn process_frames() {
         if gen != LAST_GEN.load(Relaxed) {
             LAST_GEN.store(gen, Relaxed);
             signal_hid();
+        }
+    }
+}
+
+/// Log which key objects are active whenever the HID state changes (bring-up diagnostics).
+const DEBUG_KEYS: bool = false;
+
+fn log_key_change(kb: &zent_core::device::Keyboard) {
+    let hid = kb.hid();
+    crate::log!("hid {:02x?}", &hid.keyboard[..]);
+    let keys = kb.keys();
+    for k in 0..zent_core::layout::SLOT_COUNT {
+        let o = keys.object(k);
+        if o.pressed != 0 || o.th != 0 || o.edge_p || o.edge_r {
+            crate::log!(
+                " obj {} code {} pressed {} th {} mode {} h {} raw {} p {} r {} top {} bot {} low {} peak {} press_th {} ret_th {}",
+                k, o.code[0], o.pressed, o.th, o.key_mode, kb.engine().travel(k), kb.engine().raw(k),
+                o.p, o.r, o.top, o.bot, o.low, o.peak, o.press_th, o.return_th
+            );
         }
     }
 }
