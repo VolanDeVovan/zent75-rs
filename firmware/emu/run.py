@@ -179,9 +179,15 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
     if getattr(m, "presses", None) and reason != "not-started":
         if hid is None:
             m.note(WARN, "hid", f"--press given but no {HID_GEN_SYMBOL} to observe the HID state")
-        elif hid[0] == 0:
-            m.note(FAIL, "hid", "--press did not change the keyboard HID state "
-                   "(hid_generation never moved)")
+        else:
+            from machine import CPU_HZ as _hz
+            spans = [parse_press(sp)[3:5] for sp in m.presses]
+            # a change while a press is held (or within 20 ms of its release) counts
+            inside = [c for c in hid[1] if any(t0 <= c * 1000 / _hz <= t1 + 20 for t0, t1 in spans)]
+            hid.append(len(inside))
+            if not inside:
+                m.note(FAIL, "hid", "--press did not change the keyboard HID state during the press "
+                       f"(hid_generation moved {hid[0]} time(s), none in the press window)")
 
     want_jump = hook_target is not None or expect_bootloader
     if want_jump and m.bootloader_jump is None:
@@ -251,7 +257,8 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
             f"max {stats['proc_cyc_max']} cycles" if n else "no scan processed")
     if getattr(m, "presses", None):
         chk("--press changes the HID state", ["hid"],
-            f"{hid[0]} hid_generation change(s)" if hid is not None else "not observable")
+            f"{hid[2] if len(hid) > 2 else 0} of {hid[0]} hid_generation change(s) in the press window"
+            if hid is not None else "not observable")
 
     p("")
     p("== findings")

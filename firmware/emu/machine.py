@@ -190,16 +190,18 @@ class Machine:
             self.uc.mem_write(addr, data)
 
     def watch_writes(self, symbol: str) -> list | None:
-        """Count CPU stores into a data symbol's bytes; returns a 1-element counter list (or None
+        """Count CPU stores into a data symbol's bytes; returns [count, [cycles...]] (or None
         if the ELF has no such symbol)."""
         hit = [(a, sz) for a, sz, n in self.img.symbols if n == symbol and sz]
         if not hit:
             return None
         a, sz = hit[0]
-        cnt = [0]
+        cnt = [0, []]  # count, cycle of each write
 
         def on_write(uc, access, addr, size, value, _):
             cnt[0] += 1
+            if len(cnt[1]) < 10000:
+                cnt[1].append(self.cycles)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, on_write, begin=a, end=a + sz - 1)
         return cnt
 

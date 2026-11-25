@@ -21,7 +21,9 @@ Exit code: `0` pass, `1` at least one FAIL, `2` cannot load the image.
 | `--strict-pinmux` | expected pads never muxed are failures, not warnings |
 | `--reset-flags 0x10000 --expect-bootloader` | boot as if EWDG0 reset the chip; require a clean jump to the loader |
 | `--enter-bootloader MS` | at MS force a call to the firmware's `enter_bootloader` and require a clean jump to `0x80020000` |
-| `--press ADC0:1:3:100-200:0xC000` | ADC slot override (adc, channel, mux step 0..10, time span, value) |
+| `--press ADC0:1:3:100-200:0xC000` | ADC input override (adc, channel, mux step 0..10, time span, value); the HID state must change during the press |
+| `--press SLOT:9:100-200:0xB96C` | same, by scan slot (`step × 8 + position`, interleave of `firmware/app/src/scan.rs`) |
+| `--scan-budget N` | max average cycles per scan (default 60000 = 125 µs at 480 MHz) |
 | `--adc-rest V` | ADC result of an idle input (default `0x8000`) |
 | `--trace [FILE]` | instruction trace with symbols |
 | `-v` | events and UART live; `--no-mmio` drops the register list |
@@ -43,6 +45,8 @@ ELF when built; the module is skipped when unicorn is not installed).
 | OTP | `program` / `lock` (irreversible) |
 | stack | `sp` leaves the linker `.stack` region after entering it (peak use is reported) |
 | watchdog | EWDG expires with `ot_rst_en` (feeds and the longest gap are reported) |
+| scan budget | the firmware's own `scan::STATS` (mcycle around `Keyboard::scan`) average > `--scan-budget`; scans, drops, cycles/scan and ADC-ISR cost are reported |
+| HID | with `--press`: `scan::LAST_GEN` (written when `Keyboard::hid_generation` moves) is not written while a press is held (+20 ms) |
 | UART | `--banner` given and not seen |
 | pin mux | IOC/PIOC `FUNC_CTL` of a board pad written with a different function than the table below; with `--strict-pinmux` also pads never written |
 | loader jump | with `--enter-bootloader`/`--expect-bootloader`: no jump to `0x80020000`, or L1 caches still on, or a watchdog still running (MIE / PLIC enables / USB run bit left on are warnings) |
@@ -82,7 +86,8 @@ GPIO level changes and peripheral activity (ADC sequences, PWM periods, timer re
   time source (mtime, mcycle, GPTMR cnt read hundreds of times in a row) are accelerated by
   jumping time forward, never past the next scheduled event.
 - **Interrupts**: MCHTMR (`mtime`/`mtimecmp`, embassy-time's driver) and the PLIC (priority,
-  enable, threshold, claim/complete). Andes vectored mode (`mmisc_ctl.VEC_PLIC`): the core
+  enable, threshold, claim/complete; a claimed source is not re-delivered before its completion,
+  and in preemptive mode the priorities in service raise the threshold). Andes vectored mode (`mmisc_ctl.VEC_PLIC`): the core
   auto-claims and jumps to `*(mtvec + 4·irq)`; core interrupts and exceptions go to entry 0.
   Taken at basic-block boundaries.
 - **ROM API**: table at `0x2001FF00`; `xpi_nor_driver_if` (`+0x14`) and `otp_driver_if` (`+0x0C`)
@@ -110,9 +115,10 @@ for interrupts, `self.m.fail/warn/event` for findings, `self.m.time_poll()` in t
 
 - Stage-0 hand-off state is assumed (see above), not measured; clock registers start at reset
   values, not at what stage-0 configured.
+- Busy-wait acceleration applies only to time-source reads < 100 cycles apart.
 - Timing is idealised: no XIP/cache latency, no interrupt latency, IPC 1. Real-time margins
   (scan deadlines, USB timing) are not validated.
-- Interrupts: no PLIC preemption levels, edge-style pending (a level source that stays asserted
+- Interrupts: edge-style pending (a level source that stays asserted
   is not re-raised), external-interrupt `mcause` written as `0x8000000B`; Andes `mxstatus`/PFT and
   stack-protection CSRs are plain storage.
 - Every misaligned RAM access is a failure, although the core may support some.
@@ -120,8 +126,12 @@ for interrupts, `self.m.fail/warn/event` for findings, `self.m.time_poll()` in t
 - USB: registers only, no enumeration, no USB interrupts; HID/vendor protocol cannot be tested
   here (use `firmware/sim`).
 - ADC: TRGM routing, conversion timing and the seq-DMA word layout (SDK, unverified) are
-  approximations; values come from `SensorSource`, not from a hall model; PWM1 (mux address) is a
-  register file — the mux step is the trigger index inside the PWM0 period.
+  approximations (conversion time from `conv_cfg1`); values come from `SensorSource`, not from a
+  hall model; PWM CNT runs from virtual time; PWM1 (mux address) is a register file — the mux
+  step is the trigger index inside the PWM0 period.
+- Scan cost: IPC 1, no cache misses, so real hardware needs at least as many cycles as reported.
+- The scan/HID probes read `zent75_rs::scan::STATS` (field order as declared) and
+  `zent75_rs::scan::LAST_GEN`; renaming them in the app silently disables those checks.
 - HDMA completes instantly without moving data; SPI1/WS2812 frames are not decoded.
 - GPTMR clock assumed 24 MHz, EWDG bus clock 160 MHz.
 - Pin mux checks `FUNC_CTL` only (no `PAD_CTL`); the expected table only covers pads the stock
