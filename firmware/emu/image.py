@@ -60,8 +60,11 @@ class Image:
                 for s in symtab.iter_symbols():
                     if s.name and s["st_info"]["type"] in ("STT_FUNC", "STT_OBJECT", "STT_NOTYPE") \
                             and s["st_shndx"] != "SHN_UNDEF":
-                        raw.append((s["st_value"], s["st_size"], s.name))
                         img.sym_by_name.setdefault(s.name, s["st_value"])
+                        # absolute symbols are linker constants (`_hart_stack_size = 2K`), not
+                        # addresses: they must not name the code that happens to live there
+                        if s["st_shndx"] != "SHN_ABS":
+                            raw.append((s["st_value"], s["st_size"], s.name))
         names = demangle([n for _, _, n in raw])
         img.symbols = sorted((a, sz, names.get(n, n)) for a, sz, n in raw
                              if not n.startswith((".L", "$")))
