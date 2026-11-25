@@ -18,7 +18,10 @@ use crate::sim::Request;
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
-            return Err(io::Error::new(io::ErrorKind::AddrInUse, format!("{} is in use by another simulator", path.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("{} is in use by another simulator", path.display()),
+            ));
         }
         std::fs::remove_file(path)?;
     }
@@ -54,7 +57,9 @@ pub fn execute(line: &str, tx: &Sender<Request>) -> Option<(Result<String, Strin
     if tx.send(Request { cmd, reply: rtx }).is_err() {
         return Some((Err("simulator is shutting down".into()), true));
     }
-    let r = rrx.recv_timeout(Duration::from_secs(10)).unwrap_or_else(|_| Err("no reply from the simulator loop".into()));
+    let r = rrx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| Err("no reply from the simulator loop".into()));
     Some((r, quit))
 }
 
@@ -84,7 +89,9 @@ fn serve_conn(stream: UnixStream, tx: Sender<Request>) -> io::Result<()> {
 /// Returns `Ok(true)` if the script ended with `quit`.
 pub fn run_script(text: &str, tx: &Sender<Request>, out: &mut impl Write) -> Result<bool, String> {
     for (no, line) in text.lines().enumerate() {
-        let Some((r, quit)) = execute(line, tx) else { continue };
+        let Some((r, quit)) = execute(line, tx) else {
+            continue;
+        };
         let _ = writeln!(out, "> {}", line.trim());
         let _ = out.write_all(format_reply(&r).as_bytes());
         if let Err(e) = r {

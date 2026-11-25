@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 fn short_tmp(name: &str) -> PathBuf {
     // sun_path is limited to 108 bytes; keep the socket path short.
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
     base.join(format!("zst-{}-{name}", std::process::id()))
 }
 
@@ -37,7 +39,10 @@ impl SimProc {
     fn conn(&self) -> Conn {
         let s = UnixStream::connect(&self.sock).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        Conn { r: BufReader::new(s.try_clone().unwrap()), w: s }
+        Conn {
+            r: BufReader::new(s.try_clone().unwrap()),
+            w: s,
+        }
     }
 }
 
@@ -75,7 +80,10 @@ impl Conn {
         }
     }
     fn field(&mut self, prefix: &str) -> String {
-        self.cmd("state").into_iter().find_map(|l| l.strip_prefix(prefix).map(str::to_string)).unwrap_or_default()
+        self.cmd("state")
+            .into_iter()
+            .find_map(|l| l.strip_prefix(prefix).map(str::to_string))
+            .unwrap_or_default()
     }
     fn wait_ready(&mut self) {
         let end = Instant::now() + Duration::from_secs(10);
@@ -103,7 +111,11 @@ fn socket_commands_drive_the_keyboard() {
     let sim = SimProc::start("sock", &["--state-dir", state.to_str().unwrap()]);
     let mut c = sim.conn();
     assert!(c.try_cmd("bogus").unwrap_err().contains("unknown command"));
-    assert!(c.try_cmd("press NoSuchKey").unwrap_err().contains("unknown key"));
+    assert!(
+        c.try_cmd("press NoSuchKey")
+            .unwrap_err()
+            .contains("unknown key")
+    );
     assert_eq!(c.field("profile "), "0");
     c.wait_ready();
 
@@ -140,7 +152,11 @@ fn socket_commands_drive_the_keyboard() {
     c.wait_ready();
     std::thread::sleep(Duration::from_millis(50));
     let st = c.cmd("state");
-    assert!(st.iter().any(|l| l.starts_with("hid ") && l.contains("keys=-")), "{st:?}");
+    assert!(
+        st.iter()
+            .any(|l| l.starts_with("hid ") && l.contains("keys=-")),
+        "{st:?}"
+    );
     let a = st.iter().find(|l| l.starts_with("key 46 ")).unwrap();
     assert!(a.ends_with("travel_um=0"), "{a}");
     c.cmd("release A");
@@ -166,7 +182,11 @@ fn socket_commands_drive_the_keyboard() {
 #[test]
 fn script_runs_and_exits() {
     let script = short_tmp("script.txt");
-    std::fs::write(&script, "# demo\nsleep 1700\npress A\nsleep 80\nstate\nrelease A\nsleep 80\nstate\n").unwrap();
+    std::fs::write(
+        &script,
+        "# demo\nsleep 1700\npress A\nsleep 80\nstate\nrelease A\nsleep 80\nstate\n",
+    )
+    .unwrap();
     let sock = short_tmp("script.sock");
     let out = Command::new(env!("CARGO_BIN_EXE_zent-sim"))
         .args(["--no-uhid", "--socket"])
@@ -180,13 +200,22 @@ fn script_runs_and_exits() {
     assert!(text.contains("> press A"), "{text}");
     let hids: Vec<&str> = text.lines().filter(|l| l.starts_with("hid ")).collect();
     assert_eq!(hids.len(), 2, "{text}");
-    assert!(hids[0].contains("keys=04") && hids[1].contains("keys=-"), "{hids:?}");
+    assert!(
+        hids[0].contains("keys=04") && hids[1].contains("keys=-"),
+        "{hids:?}"
+    );
     // the HID change itself is logged
     assert!(text.contains("zent-sim: hid mods=00 keys=04"), "{text}");
 
     // a failing script exits non-zero
     std::fs::write(&script, "press Nope\n").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_zent-sim")).args(["--no-uhid", "--socket"]).arg(&sock).arg("--script").arg(&script).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_zent-sim"))
+        .args(["--no-uhid", "--socket"])
+        .arg(&sock)
+        .arg("--script")
+        .arg(&script)
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     std::fs::remove_file(&script).unwrap();
 }

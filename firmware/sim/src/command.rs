@@ -63,26 +63,47 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
     let mut it = line.split_whitespace();
     let verb = it.next().unwrap().to_ascii_lowercase();
     let args: Vec<&str> = it.collect();
-    let max_args = |n: usize| if args.len() > n { Err(format!("too many arguments for {verb}")) } else { Ok(()) };
+    let max_args = |n: usize| {
+        if args.len() > n {
+            Err(format!("too many arguments for {verb}"))
+        } else {
+            Ok(())
+        }
+    };
     let c = match verb.as_str() {
         "press" => {
             max_args(2)?;
-            Command::Press { key: key(args.first().copied())?, mm: args.get(1).map(|s| mm(s)).transpose()?.unwrap_or(FULL_TRAVEL_MM) }
+            Command::Press {
+                key: key(args.first().copied())?,
+                mm: args
+                    .get(1)
+                    .map(|s| mm(s))
+                    .transpose()?
+                    .unwrap_or(FULL_TRAVEL_MM),
+            }
         }
         "travel" => {
             max_args(2)?;
-            Command::Press { key: key(args.first().copied())?, mm: mm(args.get(1).ok_or("missing mm")?)? }
+            Command::Press {
+                key: key(args.first().copied())?,
+                mm: mm(args.get(1).ok_or("missing mm")?)?,
+            }
         }
         "release" => {
             max_args(1)?;
             match args.first() {
                 Some(a) if a.eq_ignore_ascii_case("all") => Command::Release { key: None },
-                a => Command::Release { key: Some(key(a.copied())?) },
+                a => Command::Release {
+                    key: Some(key(a.copied())?),
+                },
             }
         }
         "tap" => {
             max_args(2)?;
-            Command::Tap { key: key(args.first().copied())?, ms: args.get(1).map(|s| ms(s)).transpose()?.unwrap_or(30) }
+            Command::Tap {
+                key: key(args.first().copied())?,
+                ms: args.get(1).map(|s| ms(s)).transpose()?.unwrap_or(30),
+            }
         }
         "state" => {
             max_args(0)?;
@@ -92,7 +113,11 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
             max_args(0)?;
             Command::Leds
         }
-        "hold-at-boot" => Command::HoldAtBoot(args.iter().map(|a| key(Some(a))).collect::<Result<_, _>>()?),
+        "hold-at-boot" => Command::HoldAtBoot(
+            args.iter()
+                .map(|a| key(Some(a)))
+                .collect::<Result<_, _>>()?,
+        ),
         "reboot" => {
             max_args(0)?;
             Command::Reboot

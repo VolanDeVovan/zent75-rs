@@ -18,7 +18,7 @@ use zent_core::protocol::REPORT_SIZE;
 use crate::command::{Command, HELP};
 use crate::hid;
 use crate::keynames;
-use crate::sensor::{SensorModel, FULL_TRAVEL_MM};
+use crate::sensor::{FULL_TRAVEL_MM, SensorModel};
 use crate::store::DirStorage;
 use crate::uhid::{self, DeviceInfo, Event, UhidDevice};
 
@@ -123,7 +123,12 @@ impl Sim {
                 version: hid::SIM_VERSION,
                 descriptor: hid::VENDOR_DESCRIPTOR.to_vec(),
             })?);
-            log(format!("uhid vendor device created ({:04X}:{:04X} \"{}\")", hid::VID, hid::SIM_PID, hid::VENDOR_NAME));
+            log(format!(
+                "uhid vendor device created ({:04X}:{:04X} \"{}\")",
+                hid::VID,
+                hid::SIM_PID,
+                hid::VENDOR_NAME
+            ));
         }
         if self.opts.uhid && self.opts.hid_keyboard {
             self.keyboard = Some(UhidDevice::create(DeviceInfo {
@@ -160,7 +165,11 @@ impl Sim {
         self.hid_gen = self.kb.hid_generation();
         self.last_hid = HidState::default();
         self.send_keyboard_reports(true);
-        log(format!("boot: profile {} (state {})", self.kb.active_profile(), self.storage.dir().display()));
+        log(format!(
+            "boot: profile {} (state {})",
+            self.kb.active_profile(),
+            self.storage.dir().display()
+        ));
     }
 
     pub fn online(&self) -> bool {
@@ -245,7 +254,10 @@ impl Sim {
     }
 
     pub fn enter_bootloader(&mut self) {
-        log(format!("system: enter bootloader (device gone for {:?})", self.opts.bootloader_delay));
+        log(format!(
+            "system: enter bootloader (device gone for {:?})",
+            self.opts.bootloader_delay
+        ));
         self.destroy_devices();
         self.offline_until = Some(Instant::now() + self.opts.bootloader_delay);
     }
@@ -259,7 +271,9 @@ impl Sim {
     }
 
     fn send_keyboard_reports(&mut self, all: bool) {
-        let Some(k) = self.keyboard.as_mut() else { return };
+        let Some(k) = self.keyboard.as_mut() else {
+            return;
+        };
         let h = *self.kb.hid();
         let old = self.last_hid;
         let mut res = Ok(());
@@ -282,13 +296,19 @@ impl Sim {
 
     /// Feed one vendor output report (with or without the hidraw report-id byte) to the core.
     pub fn vendor_report(&mut self, data: &[u8]) -> Option<[u8; REPORT_SIZE]> {
-        let data = if data.len() == REPORT_SIZE + 1 && data[0] == 0 { &data[1..] } else { data };
+        let data = if data.len() == REPORT_SIZE + 1 && data[0] == 0 {
+            &data[1..]
+        } else {
+            data
+        };
         if self.opts.verbose && data.len() >= 2 && data[1] != 0 {
             log(format!("vendor <- {:02x?}", &data[..data.len().min(12)]));
         }
         self.vendor_requests += 1;
         let mut out = [0u8; REPORT_SIZE];
-        self.kb.vendor_in(data, &mut self.storage, &mut out).map(|_| out)
+        self.kb
+            .vendor_in(data, &mut self.storage, &mut out)
+            .map(|_| out)
     }
 
     fn poll_uhid(&mut self) {
@@ -307,7 +327,9 @@ impl Sim {
                         self.send_vendor(&r);
                     }
                 }
-                Event::SetReport { id, rtype, data, .. } => {
+                Event::SetReport {
+                    id, rtype, data, ..
+                } => {
                     let ok = rtype == uhid::UHID_OUTPUT_REPORT;
                     let reply = if ok { self.vendor_report(&data) } else { None };
                     if let Some(v) = self.vendor.as_mut() {
@@ -329,10 +351,14 @@ impl Sim {
         }
         while let Some(Ok(Some(ev))) = self.keyboard.as_mut().map(|v| v.poll()) {
             match ev {
-                Event::Output { ref data, .. } if data.len() >= 2 && data[0] == hid::RID_KEYBOARD => {
+                Event::Output { ref data, .. }
+                    if data.len() >= 2 && data[0] == hid::RID_KEYBOARD =>
+                {
                     self.kb.set_host_leds(data[1]);
                 }
-                Event::SetReport { id, ref data, .. } if data.len() >= 2 && data[0] == hid::RID_KEYBOARD => {
+                Event::SetReport { id, ref data, .. }
+                    if data.len() >= 2 && data[0] == hid::RID_KEYBOARD =>
+                {
                     self.kb.set_host_leds(data[1]);
                     if let Some(k) = self.keyboard.as_mut() {
                         let _ = k.set_report_reply(id, 0);
@@ -355,12 +381,17 @@ impl Sim {
 
     /// Locate the hidraw node once it appears; fix or report its permissions.
     fn check_node(&mut self) {
-        let Some(v) = self.vendor.as_ref() else { return };
+        let Some(v) = self.vendor.as_ref() else {
+            return;
+        };
         if self.vendor_node.is_some() {
             return;
         }
         let now = Instant::now();
-        if self.node_checked.is_some_and(|t| now - t < Duration::from_millis(50)) {
+        if self
+            .node_checked
+            .is_some_and(|t| now - t < Duration::from_millis(50))
+        {
             return;
         }
         self.node_checked = Some(now);
@@ -375,7 +406,11 @@ impl Sim {
                         .arg(&n)
                         .status()
                         .is_ok_and(|s| s.success());
-                    log(format!("sudo -n chmod 0666 {}: {}", n.display(), if ok { "done" } else { "FAILED" }));
+                    log(format!(
+                        "sudo -n chmod 0666 {}: {}",
+                        n.display(),
+                        if ok { "done" } else { "FAILED" }
+                    ));
                 });
             } else {
                 log(format!(
@@ -433,7 +468,14 @@ impl Sim {
                 }
                 self.boot();
                 let names: Vec<&str> = keys.iter().map(|&k| keynames::name(k)).collect();
-                Ok(format!("rebooted with {} held", if names.is_empty() { "nothing".into() } else { names.join(" ") }))
+                Ok(format!(
+                    "rebooted with {} held",
+                    if names.is_empty() {
+                        "nothing".into()
+                    } else {
+                        names.join(" ")
+                    }
+                ))
             }
             Command::Reboot => {
                 self.boot();
@@ -450,7 +492,11 @@ impl Sim {
 
     pub fn state(&self) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "mode {}", if self.online() { "app" } else { "bootloader" });
+        let _ = writeln!(
+            s,
+            "mode {}",
+            if self.online() { "app" } else { "bootloader" }
+        );
         let _ = writeln!(s, "profile {}", self.kb.active_profile());
         let _ = writeln!(s, "uptime_ms {}", self.uptime_ms());
         let _ = writeln!(s, "engine_ready {}", self.kb.engine.ready() as u8);
@@ -462,7 +508,8 @@ impl Sim {
             let phys = self.sensor.travel(k);
             let tgt = self.sensor.target(k);
             let t = self.kb.engine.travel[k];
-            if phys > 0.0 || tgt > 0.0 || t > 0 {
+            // idle keys show a few µm of noise; list only moving keys or real travel
+            if phys > 0.0 || tgt > 0.0 || t >= 100 {
                 let _ = writeln!(
                     s,
                     "key {k} {} mm={phys:.3} target={tgt:.3} raw={} travel_um={t}",
@@ -517,7 +564,10 @@ pub fn run(sim: &mut Sim, rx: &Receiver<Request>, stop: &AtomicBool) {
         let due = ((now - start).as_nanos() * SCAN_HZ as u128 / 1_000_000_000) as u64;
         let mut n = due.saturating_sub(done);
         if n > 100 * SCANS_PER_MS {
-            log(format!("behind real time by {} ms, skipping", n / SCANS_PER_MS));
+            log(format!(
+                "behind real time by {} ms, skipping",
+                n / SCANS_PER_MS
+            ));
             done = due - SCANS_PER_MS;
             n = SCANS_PER_MS;
         }
@@ -527,7 +577,8 @@ pub fn run(sim: &mut Sim, rx: &Receiver<Request>, stop: &AtomicBool) {
             sim.render_leds();
             next_led = now + led_period;
         }
-        let next = start + Duration::from_nanos((done + SCANS_PER_MS) * 1_000_000_000 / SCAN_HZ as u64);
+        let next =
+            start + Duration::from_nanos((done + SCANS_PER_MS) * 1_000_000_000 / SCAN_HZ as u64);
         let now = Instant::now();
         if next > now {
             std::thread::sleep(next - now);

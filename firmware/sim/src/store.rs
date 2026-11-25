@@ -49,7 +49,9 @@ impl Storage for DirStorage {
     fn store(&mut self, slot: Slot, data: &[u8]) -> Result<(), StorageError> {
         let path = self.path(slot);
         let tmp = path.with_extension("tmp");
-        fs::write(&tmp, data).and_then(|_| fs::rename(&tmp, &path)).map_err(|_| StorageError::Io)?;
+        fs::write(&tmp, data)
+            .and_then(|_| fs::rename(&tmp, &path))
+            .map_err(|_| StorageError::Io)?;
         self.stores += 1;
         Ok(())
     }

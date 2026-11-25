@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use zent_core::config::{b2, BANK2_BASE, BANK1_SIZE, BANK2_SIZE};
+use zent_core::config::{BANK1_SIZE, BANK2_BASE, BANK2_SIZE, b2};
 use zent_core::protocol::{cmd, host};
 use zent_core::storage::{Slot, Storage, StorageError};
 use zent_sim::sim::{Options, Sim};
@@ -37,7 +37,10 @@ fn saves_survive_a_sim_restart() {
     let addr = BANK2_BASE + b2::KEY_MAP as u32 + 2 * 46; // A
     {
         let mut sim = Sim::new(Options::default(), DirStorage::open(&d).unwrap()).unwrap();
-        assert_eq!(std::fs::read(d.join("global.bin")).unwrap().len(), BANK1_SIZE);
+        assert_eq!(
+            std::fs::read(d.join("global.bin")).unwrap().len(),
+            BANK1_SIZE
+        );
         let r = sim.vendor_report(&host::write(addr, &[5, 0])).unwrap();
         assert_eq!(&r[..5], &[0xBE, 3, 5, 0, 0xED]);
         assert!(sim.vendor_report(&host::simple(cmd::SAVE)).is_none());
@@ -52,7 +55,10 @@ fn saves_survive_a_sim_restart() {
     r.extend_from_slice(&host::with_arg(cmd::SWITCH_PROFILE, 0));
     sim.vendor_report(&r);
     assert_eq!(sim.kb.profile.key_map(46), 5);
-    assert_eq!(std::fs::read(d.join("profile0.bin")).unwrap().len(), BANK2_SIZE);
+    assert_eq!(
+        std::fs::read(d.join("profile0.bin")).unwrap().len(),
+        BANK2_SIZE
+    );
     drop(sim);
     std::fs::remove_dir_all(&d).unwrap();
 }
@@ -73,7 +79,11 @@ fn load_backup_seeds_all_profiles() {
     for p in 0..4u8 {
         sim.vendor_report(&host::with_arg(cmd::SWITCH_PROFILE, p));
         let want = std::fs::read(bk.join(format!("p{p}_key_map.bin"))).unwrap();
-        assert_eq!(&sim.kb.profile.0[b2::KEY_MAP..b2::KEY_MAP + 166], &want[..], "profile {p} key_map");
+        assert_eq!(
+            &sim.kb.profile.0[b2::KEY_MAP..b2::KEY_MAP + 166],
+            &want[..],
+            "profile {p} key_map"
+        );
         let want = std::fs::read(bk.join(format!("p{p}_bind_key_setting_46.bin"))).unwrap();
         assert_eq!(&sim.kb.profile.bind_record(46)[..], &want[..]);
     }

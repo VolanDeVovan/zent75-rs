@@ -86,13 +86,27 @@ pub struct DeviceInfo {
 /// An event read from the kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Start { flags: u64 },
+    Start {
+        flags: u64,
+    },
     Stop,
     Open,
     Close,
-    Output { data: Vec<u8>, rtype: u8 },
-    GetReport { id: u32, rnum: u8, rtype: u8 },
-    SetReport { id: u32, rnum: u8, rtype: u8, data: Vec<u8> },
+    Output {
+        data: Vec<u8>,
+        rtype: u8,
+    },
+    GetReport {
+        id: u32,
+        rnum: u8,
+        rtype: u8,
+    },
+    SetReport {
+        id: u32,
+        rnum: u8,
+        rtype: u8,
+        data: Vec<u8>,
+    },
     Other(u32),
 }
 
@@ -110,13 +124,17 @@ fn rd32(b: &[u8], at: usize) -> u32 {
 }
 
 pub fn encode_create2(info: &DeviceInfo) -> Vec<u8> {
-    assert!(info.descriptor.len() <= DATA_MAX, "report descriptor too large");
+    assert!(
+        info.descriptor.len() <= DATA_MAX,
+        "report descriptor too large"
+    );
     let mut b = vec![0u8; EVENT_SIZE];
     b[0..4].copy_from_slice(&UHID_CREATE2.to_ne_bytes());
     put_str(&mut b, off::NAME, 128, &info.name);
     put_str(&mut b, off::PHYS, 64, &info.phys);
     put_str(&mut b, off::UNIQ, 64, &info.uniq);
-    b[off::RD_SIZE..off::RD_SIZE + 2].copy_from_slice(&(info.descriptor.len() as u16).to_ne_bytes());
+    b[off::RD_SIZE..off::RD_SIZE + 2]
+        .copy_from_slice(&(info.descriptor.len() as u16).to_ne_bytes());
     b[off::BUS..off::BUS + 2].copy_from_slice(&info.bus.to_ne_bytes());
     b[off::VENDOR..off::VENDOR + 4].copy_from_slice(&info.vendor.to_ne_bytes());
     b[off::PRODUCT..off::PRODUCT + 4].copy_from_slice(&info.product.to_ne_bytes());
@@ -160,15 +178,28 @@ pub fn decode(raw: &[u8]) -> Event {
     b[..n].copy_from_slice(&raw[..n]);
     let clamp = |s: u16| (s as usize).min(DATA_MAX);
     match rd32(&b, 0) {
-        UHID_START => Event::Start { flags: u64::from_ne_bytes(b[off::START_FLAGS..off::START_FLAGS + 8].try_into().unwrap()) },
+        UHID_START => Event::Start {
+            flags: u64::from_ne_bytes(
+                b[off::START_FLAGS..off::START_FLAGS + 8]
+                    .try_into()
+                    .unwrap(),
+            ),
+        },
         UHID_STOP => Event::Stop,
         UHID_OPEN => Event::Open,
         UHID_CLOSE => Event::Close,
         UHID_OUTPUT => {
             let size = clamp(rd16(&b, off::OUT_SIZE));
-            Event::Output { data: b[off::OUT_DATA..off::OUT_DATA + size].to_vec(), rtype: b[off::OUT_RTYPE] }
+            Event::Output {
+                data: b[off::OUT_DATA..off::OUT_DATA + size].to_vec(),
+                rtype: b[off::OUT_RTYPE],
+            }
         }
-        UHID_GET_REPORT => Event::GetReport { id: rd32(&b, off::REQ_ID), rnum: b[off::REQ_RNUM], rtype: b[off::REQ_RTYPE] },
+        UHID_GET_REPORT => Event::GetReport {
+            id: rd32(&b, off::REQ_ID),
+            rnum: b[off::REQ_RNUM],
+            rtype: b[off::REQ_RTYPE],
+        },
         UHID_SET_REPORT => {
             let size = clamp(rd16(&b, off::SET_SIZE));
             Event::SetReport {
@@ -243,7 +274,12 @@ fn write_all_once(f: &mut File, buf: &[u8]) -> io::Result<()> {
     loop {
         match f.write(buf) {
             Ok(n) if n == buf.len() => return Ok(()),
-            Ok(n) => return Err(io::Error::other(format!("short uhid write {n}/{}", buf.len()))),
+            Ok(n) => {
+                return Err(io::Error::other(format!(
+                    "short uhid write {n}/{}",
+                    buf.len()
+                )));
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         }
@@ -256,7 +292,9 @@ pub fn find_hidraw_by_uniq(sys_hidraw: &Path, uniq: &str) -> Option<PathBuf> {
     let mut entries: Vec<_> = std::fs::read_dir(sys_hidraw).ok()?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
-        let Ok(ue) = std::fs::read_to_string(e.path().join("device/uevent")) else { continue };
+        let Ok(ue) = std::fs::read_to_string(e.path().join("device/uevent")) else {
+            continue;
+        };
         if ue.lines().any(|l| l == want) {
             return Some(Path::new("/dev").join(e.file_name()));
         }
@@ -267,7 +305,9 @@ pub fn find_hidraw_by_uniq(sys_hidraw: &Path, uniq: &str) -> Option<PathBuf> {
 /// Whether the current user may open `path` read-write.
 pub fn accessible(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
     // SAFETY: `c` is a valid NUL-terminated path.
     unsafe { libc::access(c.as_ptr(), libc::R_OK | libc::W_OK) == 0 }
 }
@@ -326,7 +366,10 @@ mod tests {
         assert_eq!(rd16(&b, 4), 3);
         assert_eq!(&b[6..], &[1, 2, 3]);
         let r = encode_get_report_reply(7, 5, &[]);
-        assert_eq!((rd32(&r, 0), rd32(&r, 4), rd16(&r, 8), rd16(&r, 10)), (10, 7, 5, 0));
+        assert_eq!(
+            (rd32(&r, 0), rd32(&r, 4), rd16(&r, 8), rd16(&r, 10)),
+            (10, 7, 5, 0)
+        );
         let s = encode_set_report_reply(9, 0);
         assert_eq!((rd32(&s, 0), rd32(&s, 4), rd16(&s, 8)), (14, 9, 0));
     }

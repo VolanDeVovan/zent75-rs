@@ -40,7 +40,10 @@ impl Value {
 }
 
 pub fn parse(s: &str) -> Result<Value, String> {
-    let mut p = Parser { b: s.as_bytes(), i: 0 };
+    let mut p = Parser {
+        b: s.as_bytes(),
+        i: 0,
+    };
     let v = p.value()?;
     p.ws();
     if p.i != p.b.len() {
@@ -135,11 +138,18 @@ impl Parser<'_> {
             Some(b'n') => self.lit("null", Value::Null),
             Some(c) if *c == b'-' || c.is_ascii_digit() => {
                 let st = self.i;
-                while self.i < self.b.len() && matches!(self.b[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+                while self.i < self.b.len()
+                    && matches!(
+                        self.b[self.i],
+                        b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+                    )
+                {
                     self.i += 1;
                 }
                 let t = std::str::from_utf8(&self.b[st..self.i]).unwrap();
-                t.parse().map(Value::Num).or_else(|_| self.err("bad number"))
+                t.parse()
+                    .map(Value::Num)
+                    .or_else(|_| self.err("bad number"))
             }
             _ => self.err("unexpected input"),
         }
@@ -151,12 +161,16 @@ impl Parser<'_> {
         self.i += 1;
         let mut out = String::new();
         loop {
-            let Some(&c) = self.b.get(self.i) else { return self.err("unterminated string") };
+            let Some(&c) = self.b.get(self.i) else {
+                return self.err("unterminated string");
+            };
             self.i += 1;
             match c {
                 b'"' => return Ok(out),
                 b'\\' => {
-                    let Some(&e) = self.b.get(self.i) else { return self.err("bad escape") };
+                    let Some(&e) = self.b.get(self.i) else {
+                        return self.err("bad escape");
+                    };
                     self.i += 1;
                     match e {
                         b'"' => out.push('"'),
@@ -169,7 +183,11 @@ impl Parser<'_> {
                         b'f' => out.push('\u{c}'),
                         b'u' => {
                             let h = self.b.get(self.i..self.i + 4).ok_or("JSON: bad \\u")?;
-                            let cp = u32::from_str_radix(std::str::from_utf8(h).map_err(|e| e.to_string())?, 16).map_err(|e| e.to_string())?;
+                            let cp = u32::from_str_radix(
+                                std::str::from_utf8(h).map_err(|e| e.to_string())?,
+                                16,
+                            )
+                            .map_err(|e| e.to_string())?;
                             self.i += 4;
                             out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                         }
@@ -186,7 +204,10 @@ impl Parser<'_> {
                         _ => 4,
                     };
                     self.i = st + len;
-                    out.push_str(std::str::from_utf8(self.b.get(st..self.i).ok_or("JSON: truncated")?).map_err(|e| e.to_string())?);
+                    out.push_str(
+                        std::str::from_utf8(self.b.get(st..self.i).ok_or("JSON: truncated")?)
+                            .map_err(|e| e.to_string())?,
+                    );
                 }
             }
         }
@@ -199,8 +220,18 @@ mod tests {
     #[test]
     fn basics() {
         let v = parse(r#"{"a": [1, 2.5, -3], "b": {"c": "x\"yA"}, "d": null, "e": true}"#).unwrap();
-        assert_eq!(v.get("b").unwrap().get("c").unwrap().as_str(), Some("x\"yA"));
-        assert_eq!(v.get("a"), Some(&Value::Arr(vec![Value::Num(1.0), Value::Num(2.5), Value::Num(-3.0)])));
+        assert_eq!(
+            v.get("b").unwrap().get("c").unwrap().as_str(),
+            Some("x\"yA")
+        );
+        assert_eq!(
+            v.get("a"),
+            Some(&Value::Arr(vec![
+                Value::Num(1.0),
+                Value::Num(2.5),
+                Value::Num(-3.0)
+            ]))
+        );
         assert!(parse("{").is_err());
         assert_eq!(parse("2148008288").unwrap().as_u64(), Some(2148008288));
     }

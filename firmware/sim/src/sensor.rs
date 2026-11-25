@@ -49,8 +49,20 @@ impl SensorModel {
             rest[k] = REST_NOMINAL + spread(h, REST_SPREAD);
             bottom[k] = BOTTOM_NOMINAL + spread(h >> 32, BOTTOM_SPREAD);
         }
-        let slew = if slew_mm_s > 0.0 { slew_mm_s / SCAN_HZ as f32 } else { f32::INFINITY };
-        Self { rest, bottom, noise, rng: splitmix(seed ^ 0xA5A5), travel: [0.0; KEY_COUNT], target: [0.0; KEY_COUNT], slew }
+        let slew = if slew_mm_s > 0.0 {
+            slew_mm_s / SCAN_HZ as f32
+        } else {
+            f32::INFINITY
+        };
+        Self {
+            rest,
+            bottom,
+            noise,
+            rng: splitmix(seed ^ 0xA5A5),
+            travel: [0.0; KEY_COUNT],
+            target: [0.0; KEY_COUNT],
+            slew,
+        }
     }
 
     pub fn rest(&self, key: usize) -> f32 {
@@ -95,7 +107,11 @@ impl SensorModel {
         for k in 0..KEY_COUNT {
             let d = self.target[k] - self.travel[k];
             if d != 0.0 {
-                self.travel[k] = if d.abs() <= self.slew { self.target[k] } else { self.travel[k] + self.slew.copysign(d) };
+                self.travel[k] = if d.abs() <= self.slew {
+                    self.target[k]
+                } else {
+                    self.travel[k] + self.slew.copysign(d)
+                };
             }
         }
     }

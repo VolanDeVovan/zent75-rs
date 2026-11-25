@@ -1,4 +1,4 @@
-use zent_core::layout::{KEY_COUNT, KEY_TO_SLOT, SCAN_HZ, SLOT_TO_KEY, NO_KEY};
+use zent_core::layout::{KEY_COUNT, KEY_TO_SLOT, NO_KEY, SCAN_HZ, SLOT_TO_KEY};
 use zent_sim::sensor::*;
 
 #[test]
@@ -8,7 +8,10 @@ fn rest_and_bottom_levels() {
         let rest = m.level(k, 0.0) as i32;
         let bottom = m.level(k, FULL_TRAVEL_MM) as i32;
         assert!((rest - 30000).abs() <= REST_SPREAD, "key {k} rest {rest}");
-        assert!((bottom - 18000).abs() <= BOTTOM_SPREAD, "key {k} bottom {bottom}");
+        assert!(
+            (bottom - 18000).abs() <= BOTTOM_SPREAD,
+            "key {k} bottom {bottom}"
+        );
         let mid = m.level(k, FULL_TRAVEL_MM / 2.0) as i32;
         assert!((mid - (rest + bottom) / 2).abs() <= 1);
         // beyond the ends it clamps

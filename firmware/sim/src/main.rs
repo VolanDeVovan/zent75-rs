@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use zent_sim::command::Command;
 use zent_sim::control;
-use zent_sim::sim::{self, log, Options, Request, Sim};
+use zent_sim::sim::{self, Options, Request, Sim, log};
 use zent_sim::store::DirStorage;
 
 const USAGE: &str = "\
@@ -46,12 +46,17 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
-        opts: Options { uhid: true, ..Options::default() },
+        opts: Options {
+            uhid: true,
+            ..Options::default()
+        },
         state_dir: None,
         load_backup: None,
         socket: std::env::var_os("XDG_RUNTIME_DIR")
             .map(|d| PathBuf::from(d).join("zent75-sim.sock"))
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("zent75-sim-{}.sock", unsafe { libc::getuid() }))),
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("zent75-sim-{}.sock", unsafe { libc::getuid() }))
+            }),
         script: None,
         stay: false,
     };
@@ -70,7 +75,10 @@ fn parse_args() -> Result<Args, String> {
             "--no-uhid" => a.opts.uhid = false,
             "--hid-keyboard" => a.opts.hid_keyboard = true,
             "--sudo-chmod" => a.opts.sudo_chmod = true,
-            "--bootloader-ms" => a.opts.bootloader_delay = Duration::from_millis(val()?.parse().map_err(|_| "bad --bootloader-ms")?),
+            "--bootloader-ms" => {
+                a.opts.bootloader_delay =
+                    Duration::from_millis(val()?.parse().map_err(|_| "bad --bootloader-ms")?)
+            }
             "--verbose" => a.opts.verbose = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {flag}")),
@@ -98,7 +106,10 @@ fn main() -> ExitCode {
 
     let (state_dir, temp_state) = match &args.state_dir {
         Some(d) => (d.clone(), false),
-        None => (std::env::temp_dir().join(format!("zent75-sim-state-{}", std::process::id())), true),
+        None => (
+            std::env::temp_dir().join(format!("zent75-sim-state-{}", std::process::id())),
+            true,
+        ),
     };
     let mut storage = match DirStorage::open(&state_dir) {
         Ok(s) => s,
@@ -107,11 +118,21 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    log(format!("state-dir {}{}", state_dir.display(), if temp_state { " (temporary)" } else { "" }));
+    log(format!(
+        "state-dir {}{}",
+        state_dir.display(),
+        if temp_state { " (temporary)" } else { "" }
+    ));
     if let Some(b) = &args.load_backup {
         match zent_sim::backup::load_backup(b, &mut storage) {
             Ok(s) => {
-                log(format!("loaded backup {} (fw {}, {} regions, active profile {})", b.display(), s.firmware, s.regions, s.active_profile));
+                log(format!(
+                    "loaded backup {} (fw {}, {} regions, active profile {})",
+                    b.display(),
+                    s.firmware,
+                    s.regions,
+                    s.active_profile
+                ));
                 for w in s.skipped {
                     log(format!("  skipped: {w}"));
                 }
@@ -135,7 +156,9 @@ fn main() -> ExitCode {
     let mut sim = match Sim::new(args.opts.clone(), storage) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("zent-sim: cannot create the uhid device: {e} (need rw on /dev/uhid, or use --no-uhid)");
+            eprintln!(
+                "zent-sim: cannot create the uhid device: {e} (need rw on /dev/uhid, or use --no-uhid)"
+            );
             let _ = std::fs::remove_file(&args.socket);
             return ExitCode::FAILURE;
         }
@@ -163,7 +186,10 @@ fn main() -> ExitCode {
             *res.lock().unwrap() = r.map(|_| ());
             if !quit && !stay {
                 let (rtx, _rrx) = mpsc::channel();
-                let _ = tx.send(Request { cmd: Command::Quit, reply: rtx });
+                let _ = tx.send(Request {
+                    cmd: Command::Quit,
+                    reply: rtx,
+                });
             }
         });
     }
@@ -176,5 +202,9 @@ fn main() -> ExitCode {
     if temp_state {
         let _ = std::fs::remove_dir_all(&state_dir);
     }
-    if script_result.lock().unwrap().is_err() { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if script_result.lock().unwrap().is_err() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
