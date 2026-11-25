@@ -1,7 +1,7 @@
 //! UART0 log console (PA00 TXD / PA01 RXD, 115 200 8N1, output only) — same pins, clock and
 //! divisor as the stock firmware (docs/re-peripherals.md §1).
 //!
-//! Logging never blocks the caller: `log!` formats into a RAM ring buffer and the low-priority
+//! After boot, logging never blocks the caller: `log!` formats into a RAM ring buffer and the low-priority
 //! [`drain`] (called from a 1 ms task) feeds the 16-byte TX FIFO. Lines that do not fit are
 //! dropped and counted. Only the panic path writes synchronously ([`write_blocking`]). Safe to
 //! call from any context (the ring is guarded by a short critical section).
@@ -22,6 +22,15 @@ struct Ring {
     head: usize,
     len: usize,
     dropped: u32,
+}
+
+/// While true (boot, until the executor runs) every `log!` is written out synchronously, so a
+/// hang during init still leaves its last line on the console.
+static SYNC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Switch from synchronous boot logging to the buffered ring drained by [`drain`].
+pub fn go_async() {
+    SYNC.store(false, core::sync::atomic::Ordering::Relaxed);
 }
 
 static LOG: Mutex<RefCell<Ring>> = Mutex::new(RefCell::new(Ring { buf: [0; RING], head: 0, len: 0, dropped: 0 }));
@@ -82,6 +91,9 @@ pub fn write_fmt(args: fmt::Arguments) {
             r.len += n;
         }
     });
+    if SYNC.load(core::sync::atomic::Ordering::Relaxed) {
+        flush_blocking();
+    }
 }
 
 /// Move up to one FIFO's worth of bytes to the UART. Call often (≥ every 1 ms).

@@ -91,6 +91,7 @@ static READY_IDX: AtomicU32 = AtomicU32::new(0);
 static READY_SEQ: AtomicU32 = AtomicU32::new(0);
 static mut LAST_DONE: u32 = 0;
 static mut LAST_GEN: u32 = 0;
+static mut IN_PROCESS: bool = false;
 
 /// Raised whenever `Keyboard::hid_generation()` moves (one per HID IN endpoint task).
 pub static HID_KBD: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -349,6 +350,14 @@ unsafe fn GPTMR1() {
     let t = pac::GPTMR1;
     t.channel(0).cr().write(|w| w.0 = 0x208); // stop
     t.sr().write(|w| w.0 = 1);
+    // With PLIC preemption the gateway never re-delivers a claimed source, so this handler
+    // cannot nest into itself. Guard anyway (cheap): a nested entry just returns, the running
+    // instance loops until it has consumed the newest frame.
+    if IN_PROCESS {
+        hpm_hal::interrupt::GPTMR1.complete();
+        return;
+    }
+    IN_PROCESS = true;
     riscv::interrupt::enable(); // nesting: higher PLIC priorities may preempt from here
 
     let mut frame = [0u16; SLOT_COUNT];
@@ -386,6 +395,7 @@ unsafe fn GPTMR1() {
     }
 
     riscv::interrupt::disable();
+    IN_PROCESS = false;
     hpm_hal::interrupt::GPTMR1.complete();
 }
 

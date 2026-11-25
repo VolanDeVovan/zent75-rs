@@ -146,8 +146,7 @@ fn nor_modify(addr: u32, len: u32, op: Op) -> Result<(), FlashError> {
             }
         };
         core::arch::asm!("fence.i");
-        // Stale lines of this range may sit in the D-cache (XIP reads are cached).
-        andes_riscv::l1c::dc_invalidate(addr & !63, (len + 63) & !63);
+        dcache_drop_xip();
         if st != 0 {
             return Err(FlashError::Rom(st));
         }
@@ -155,11 +154,21 @@ fn nor_modify(addr: u32, len: u32, op: Op) -> Result<(), FlashError> {
     Ok(())
 }
 
-/// Read through the XIP window (after invalidating the D-cache lines).
+/// Drop stale XIP lines from the L1 D-cache after the NOR changed underneath it.
+///
+/// Whole-cache "write back + invalidate" (Andes CCTL `L1D_WBINVAL_ALL`): the only cacheable
+/// memory this firmware touches is the XIP window (ILM/DLM are not cached, peripherals are
+/// device memory), so nothing dirty can be lost, and the command does not depend on the
+/// cache-line size CSR (andes-riscv's per-line helper panics when `mdcm_cfg` reads 0).
+fn dcache_drop_xip() {
+    const L1D_WBINVAL_ALL: usize = 6;
+    unsafe { core::arch::asm!("csrw 0x7CC, {0}", in(reg) L1D_WBINVAL_ALL) };
+}
+
+/// Read through the XIP window (after dropping stale D-cache lines).
 fn nor_read(addr: u32, out: &mut [u32]) {
-    let len = (out.len() * 4) as u32;
+    dcache_drop_xip();
     unsafe {
-        andes_riscv::l1c::dc_invalidate(addr & !63, (len + (addr & 63) + 63) & !63);
         for (i, w) in out.iter_mut().enumerate() {
             *w = core::ptr::read_volatile((addr as usize + i * 4) as *const u32);
         }

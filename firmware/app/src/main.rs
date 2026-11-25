@@ -198,6 +198,8 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(service_task()).unwrap();
     spawner.spawn(rgb_task()).unwrap();
     spawner.spawn(health_task()).unwrap();
+    log!("init done");
+    console::go_async();
 
     loop {
         Timer::after_secs(3600).await;

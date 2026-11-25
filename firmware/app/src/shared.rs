@@ -89,6 +89,11 @@ pub fn setup_plic() {
     hpm_hal::interrupt::HDMA.disable();
 }
 
+/// Set a PLIC source priority. Not `InterruptExt::set_priority`: hpm-hal 620f58d passes the IRQ
+/// number to metapac's `PLIC.priority(n)`, whose index 0 is *source 1* (register 0x04), so it
+/// programs the priority of the next source (ADC0 → ADC1's register) and leaves ours at its
+/// reset value. Here the register of source `n` is `PLIC + 4·n`, as in hpm_sdk.
 pub fn set_prio(irq: impl InterruptExt, prio: Priority) {
-    irq.set_priority(prio);
+    let n = irq.number();
+    pac::PLIC.priority(n - 1).write(|w| w.set_priority(prio as u32));
 }
