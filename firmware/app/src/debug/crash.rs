@@ -91,11 +91,14 @@ pub fn heartbeat() {
 /// follows, the boot after it goes to the UF2 loader, and the next start of this firmware logs
 /// the record.
 pub fn stall_check(scans: u32, pc: u32) {
+    static LAST_CHECK: AtomicU32 = AtomicU32::new(0);
     static LAST_BEAT: AtomicU32 = AtomicU32::new(u32::MAX);
     static MISSED: AtomicU32 = AtomicU32::new(0);
-    if !scans.is_multiple_of(CHECK_EVERY_SCANS) {
+    // not `scans % N == 0`: one call can follow two scans
+    if scans.wrapping_sub(LAST_CHECK.load(Relaxed)) < CHECK_EVERY_SCANS {
         return;
     }
+    LAST_CHECK.store(scans, Relaxed);
     let beat = BEAT.load(Relaxed);
     if beat != LAST_BEAT.swap(beat, Relaxed) {
         MISSED.store(0, Relaxed);

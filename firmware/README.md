@@ -105,7 +105,7 @@ PLIC runs vectored + preemptive like stock.
 **Late ADC steps.** Under load the capture ISR can run after the next mux step's first
 conversion has landed in the DMA buffer; such a torn buffer mixes two steps and looked like a
 full key press on hardware. `scan.rs` drops a step captured later than `LATEST_TICKS` after its
-trigger (`late` on the console) and the frame keeps that step's previous samples.
+trigger (`late` on the console) and the frame keeps the samples that step had two scans ago.
 
 ### `unsafe` in the board layer
 

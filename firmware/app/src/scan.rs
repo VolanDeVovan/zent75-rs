@@ -56,7 +56,7 @@ const SEQ_DONE_TICKS: u32 = 1550;
 /// DMA buffer ~96 ticks later, overwriting input 0. A later ISR (seen on hardware: up to ~2300
 /// under USB load) would store a mix of two mux steps — single-scan spikes of ~10000 counts
 /// that the engine reads as a full key press. Such a step is dropped (`late` statistic); the
-/// frame keeps that step's previous samples.
+/// frame keeps the samples that step had two scans ago (the frames alternate).
 const LATEST_TICKS: u32 = STEP_TICKS + 60;
 
 /// ADC0 then ADC1 channel per input index.
@@ -438,7 +438,8 @@ fn GPTMR1() {
     if !IN_PROCESS.load(Relaxed) {
         IN_PROCESS.store(true, Relaxed); // MIE is still off: no window between load and store
         // SAFETY: nesting. From here the PLIC (preemptive mode) delivers only sources above
-        // this handler's priority — ADC0 and USB0, which share nothing with it but atomics —
+        // this handler's priority — ADC0, USB0 and the profiler's GPTMR0, which share nothing
+        // with it but atomics —
         // and the entry/exit code of `external_interrupt` saves and restores mepc/mstatus.
         unsafe { riscv::interrupt::enable() };
         process_frames();
