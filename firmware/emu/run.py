@@ -55,12 +55,16 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
          strict_pinmux: bool = False, align_check: bool = True, trace=None, verbose=False,
          enter_bootloader_ms: float | None = None, show_mmio: bool = True,
          reset_flags: int = 0, expect_bootloader: bool = False, preload=None,
-         adc_rest: int | None = None, presses=(), scan_budget: int = SCAN_BUDGET) -> Result:
+         adc_rest: int | None = None, adc_noise: int = 0, div_cycles: int = 1,
+         profile_from_ms: float | None = None, presses=(), scan_budget: int = SCAN_BUDGET) -> Result:
     """Run the gate on an ELF/UF2 path (or an `Image`) and return the `Result`."""
     img = path if isinstance(path, Image) else Image.load(path)
     names = RegNames()
     m = Machine(img, names if names.available else None, align_check=align_check, trace=trace,
                 verbose=verbose, reset_flags=reset_flags)
+    m.div_cycles = div_cycles
+    if profile_from_ms is not None:
+        m.prof, m.prof_from = {}, int(profile_from_ms * CPU_HZ / 1000)
     m.load_image()
     if backup:
         m.preload_flash(config_banks_from_backup(backup))
@@ -68,6 +72,7 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
         m.preload_flash(preload)
     if adc_rest is not None:
         m.sensor.rest = adc_rest
+    m.sensor.noise = adc_noise
     for spec in presses:
         m.sensor.press(*parse_press(spec))
     m.hid_watch = m.watch_writes(HID_GEN_SYMBOL)
@@ -91,7 +96,20 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
             reason = m.run(ms)
     lines = report(m, reason, img, names, banner, strict_pinmux, ms, backup, hook_target,
                    enter_bootloader_ms, show_mmio, expect_bootloader)
+    if m.prof:
+        lines += profile_lines(m)
     return Result(m, reason, lines)
+
+
+def profile_lines(m, top: int = 30) -> list[str]:
+    """Emulated cycles per function (by the symbol of each basic block's start)."""
+    per: collections.Counter = collections.Counter()
+    for addr, n in m.prof.items():
+        per[re.sub(r"\+0x[0-9a-f]+$", "", m.sym(addr))] += n
+    total = sum(per.values()) or 1
+    out = ["", f"profile from {m.prof_from / CPU_HZ * 1000:.0f} ms: {total} cycles"]
+    out += [f"  {n * 100 / total:5.1f}% {n:12d}  {name}" for name, n in per.most_common(top)]
+    return out
 
 
 def parse_press(spec: str):
@@ -373,6 +391,12 @@ def main(argv=None) -> int:
     ap.add_argument("--expect-bootloader", action="store_true",
                     help="require a clean jump to the loader (use with --reset-flags)")
     ap.add_argument("--adc-rest", type=lambda x: int(x, 0), help="ADC result of an idle input (default 0x8000)")
+    ap.add_argument("--adc-noise", type=int, default=0,
+                    help="± counts of pseudo-random noise on every conversion (default 0)")
+    ap.add_argument("--profile-from", type=float, metavar="MS",
+                    help="print emulated cycles per function from this virtual time on")
+    ap.add_argument("--div-cycles", type=int, default=1,
+                    help="cycles charged per div/rem/fdiv/fsqrt (default 1; the D45 takes up to ~35)")
     ap.add_argument("--press", action="append", default=[], metavar="ADCn:CH:STEP:T0-T1:VALUE",
                     help="override one ADC input (channel, mux step 0..10) between T0 and T1 ms; "
                          "or SLOT:n:T0-T1:VALUE (slot = step*8 + position); the HID state must change")
@@ -392,7 +416,8 @@ def main(argv=None) -> int:
                    align_check=not a.no_align_check, trace=trace, verbose=a.verbose,
                    enter_bootloader_ms=a.enter_bootloader, show_mmio=not a.no_mmio,
                    reset_flags=a.reset_flags, expect_bootloader=a.expect_bootloader,
-                   adc_rest=a.adc_rest, presses=a.press, scan_budget=a.scan_budget)
+                   adc_rest=a.adc_rest, adc_noise=a.adc_noise, div_cycles=a.div_cycles,
+                   profile_from_ms=a.profile_from, presses=a.press, scan_budget=a.scan_budget)
     except (OSError, ValueError) as e:
         print(f"cannot load {a.image}: {e}", file=sys.stderr)
         return 2

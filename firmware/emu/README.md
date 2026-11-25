@@ -29,6 +29,9 @@ which takes the whole erase / program / verify path through the flash gate).
 | `--press SLOT:9:100-200:0xB96C` | same, by scan slot (`step × 8 + position`, interleave of `firmware/app/src/scan.rs`) |
 | `--scan-budget N` | max average cycles per scan (default 60000 = 125 µs at 480 MHz) |
 | `--adc-rest V` | ADC result of an idle input (default `0x8000`) |
+| `--adc-noise N` | ± N counts of deterministic pseudo-random noise on every conversion (default 0; real sensors move the filtered value every scan) |
+| `--div-cycles N` | cycles charged per `div`/`rem`/`fdiv`/`fsqrt` (default 1 = one per instruction; the D45 divider takes up to ~35) — for comparing builds, not for the budget |
+| `--profile-from MS` | print emulated cycles per function from virtual time MS to the end (block-level, by symbol) |
 | `--trace [FILE]` | instruction trace with symbols |
 | `-v` | events and UART live; `--no-mmio` drops the register list |
 

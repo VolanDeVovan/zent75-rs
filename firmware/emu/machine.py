@@ -92,6 +92,13 @@ class Machine:
         self.first_wfi_pc = None
         self.blocks = collections.deque(maxlen=24)
         self._bcount: dict[tuple[int, int], int] = {}
+        # Cycles charged per integer/FP division (`div[u]`, `rem[u]`, `fdiv.s`, `fsqrt.s`); every
+        # other instruction counts 1. The D45's iterative divider takes up to ~35 cycles, so
+        # `--div-cycles 35` gives a closer real-time estimate when comparing builds.
+        self.div_cycles = 1
+        # Cycle histogram per basic block from `prof_from` (cycles) on; None = off.
+        self.prof: dict[int, int] | None = None
+        self.prof_from = 0
         self._queue: list = []
         self._qseq = 0
         self.deadline = None
@@ -537,13 +544,23 @@ class Machine:
             data = bytes(self.uc.mem_read(addr, size))
             n, o = 0, 0
             while o < size:
-                o += 4 if data[o] & 3 == 3 else 2
+                if data[o] & 3 == 3:
+                    w = int.from_bytes(data[o:o + 4], "little")
+                    op, f3, f7 = w & 0x7F, (w >> 12) & 7, w >> 25
+                    if (op == 0x33 and f7 == 1 and f3 >= 4) or (op == 0x53 and f7 in (0x0C, 0x2C)):
+                        n += self.div_cycles - 1
+                    o += 4
+                else:
+                    o += 2
                 n += 1
             self._bcount[key] = n
         return n
 
     def _on_block(self, uc, addr, size, _):
-        self.cycles += self._ninsn(addr, size)
+        n = self._ninsn(addr, size)
+        self.cycles += n
+        if self.prof is not None and self.cycles >= self.prof_from:
+            self.prof[addr] = self.prof.get(addr, 0) + n
         self.blocks.append(addr)
         sp = uc.reg_read(R.UC_RISCV_REG_SP)
         if self.stack:

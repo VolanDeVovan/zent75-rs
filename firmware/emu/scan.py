@@ -25,11 +25,15 @@ ADC_IRQ = {"ADC0": 58, "ADC1": 59}
 
 
 class SensorSource:
-    """Conversion results. Default: every input rests at `rest` (+ a tiny deterministic ripple).
+    """Conversion results. Default: every input rests at `rest` (+ a tiny deterministic ripple,
+    plus deterministic pseudo-random noise of ±`noise` counts — real sensors move the filtered
+    value every scan, which defeats the engine's unchanged-input shortcut).
     `press(adc, channel, step, start_ms, end_ms, value)` overrides one slot for a time span."""
 
-    def __init__(self, rest: int = 0x8000) -> None:
+    def __init__(self, rest: int = 0x8000, noise: int = 0) -> None:
         self.rest = rest
+        self.noise = noise
+        self.lcg = 1
         self.overrides: list[tuple[str, int, int, float, float, int]] = []
         self.samples = 0
 
@@ -41,7 +45,11 @@ class SensorSource:
         for a, c, s, t0, t1, v in self.overrides:
             if a == adc and c == channel and s == step and t0 <= t_ms < t1:
                 return v & 0xFFFF
-        return (self.rest + ((channel * 7 + step * 3 + self.samples) % 5) - 2) & 0xFFFF
+        v = self.rest + ((channel * 7 + step * 3 + self.samples) % 5) - 2
+        if self.noise:
+            self.lcg = (self.lcg * 1103515245 + 12345) & 0x7FFFFFFF
+            v += (self.lcg >> 8) % (2 * self.noise + 1) - self.noise
+        return v & 0xFFFF
 
 
 class Adc16(RegFile):
