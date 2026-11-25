@@ -82,7 +82,9 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    pub fn new(serial: [u8; 16]) -> Self {
+    /// `const` so the MCU can place the keyboard in a `static` initialised at link time: the
+    /// ~40 KB struct must never be built on the 16 KB stack (see [`Keyboard::set_serial`]).
+    pub const fn new(serial: [u8; 16]) -> Self {
         Self {
             global: Global::blank(),
             profile: Profile::blank(),
@@ -94,13 +96,30 @@ impl Keyboard {
             stream_ctr: 0,
             calibration: false,
             diag_flag: false,
-            pending: Pending::default(),
+            pending: Pending {
+                switch_to: None,
+                wipe: false,
+                reset_profile: false,
+                action: None,
+                profile_notice: None,
+            },
             hid_gen: 0,
-            hid_last: HidState::default(),
+            hid_last: HidState {
+                keyboard: crate::hid::KeyboardState { modifiers: 0, keys: [0; 32] },
+                consumer: 0,
+                consumer_bits: 0,
+                system: 0,
+                mouse_buttons: 0,
+            },
             scans: 0,
             switch_cooldown: 0,
             wipe_left: None,
         }
+    }
+
+    /// Set the serial number reported by `BE 1D` (for a keyboard built by `new` in a `static`).
+    pub fn set_serial(&mut self, serial: [u8; 16]) {
+        self.serial = serial;
     }
 
     /// Load the banks from storage. Missing/blank banks become the factory images and every
@@ -108,7 +127,7 @@ impl Keyboard {
     /// repaired bank is written back, a valid one is never touched.
     pub fn boot(&mut self, st: &mut impl Storage) {
         if st.load(Slot::Global, &mut self.global.0).is_err() {
-            self.global = Global::blank();
+            self.global.0.fill(0xFF); // in place: no bank-sized temporary on the stack
         }
         if self.global.repair(VERSION_WORD) {
             let _ = st.store(Slot::Global, &self.global.0);
@@ -121,7 +140,7 @@ impl Keyboard {
     /// Read profile `p` (stock `FUN_0001385C`): force/fix-up, validate, repair + write back.
     fn load_profile(&mut self, st: &mut impl Storage, p: usize) {
         if st.load(Slot::Profile(p as u8), &mut self.profile.0).is_err() {
-            self.profile = Profile::blank();
+            self.profile.0.fill(0xFF);
         }
         if self.profile.load_fixup(p) {
             let _ = st.store(Slot::Profile(p as u8), &self.profile.0);
