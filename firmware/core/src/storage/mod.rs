@@ -1,9 +1,18 @@
-//! Persistent storage abstraction for the config banks.
+//! Persistent storage of the config banks.
 //!
-//! The platform implements [`Storage`] (NOR flash through the ROM API on the board, a file in
-//! the simulator, a `Vec` in tests). The core decides *what* to persist; the platform only moves
-//! bytes. [`check_write_range`] is the last line of defence against touching the boot region
-//! (`0x8000_0000..0x8004_0000`, docs/boot-recovery.md) and must be called by every flash driver.
+//! [`Keyboard`](crate::device::Keyboard) decides *what* to persist and talks to a [`Storage`]:
+//! two kinds of blobs, bank 1 and one bank-2 image per profile. Implementations:
+//!
+//! * [`nor::BankStore`] — the board: the stock NOR layout on a raw [`nor::Nor`] device, with
+//!   RAM staging, debounced commits and read-back verification;
+//! * `zent-sim`'s directory of files;
+//! * [`mem::MemStorage`] for tests.
+//!
+//! [`check_write_range`] is the last line of defence against touching the boot region
+//! (`0x8000_0000..0x8004_0000`, docs/boot-recovery.md): [`nor::BankStore`] passes every erase
+//! and program through it, and a flash driver must check it again itself.
+
+pub mod nor;
 
 /// Where a blob lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

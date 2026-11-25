@@ -11,7 +11,10 @@
 //! (reset/latch ≥ 280 µs is guaranteed by the ≥ 10 ms refresh interval).
 //! Wire order per LED: G, R, B, MSB first (core renders `[r, g, b]`).
 
+use core::sync::atomic::{compiler_fence, Ordering};
+
 use hpm_hal::pac;
+use static_cell::ConstStaticCell;
 use zent_core::layout::LED_COUNT;
 
 /// Words per frame: 24 per LED + trailing zero (stock buffer layout).
@@ -37,54 +40,62 @@ const DMA_CH: usize = 0;
 #[repr(C, align(64))]
 struct Buf([u16; WORDS]);
 /// DLM is not behind the D-cache, so the DMA sees CPU writes without a flush.
-static mut BUF: Buf = Buf([0; WORDS]);
-static mut BUSY: bool = false;
+static BUF: ConstStaticCell<Buf> = ConstStaticCell::new(Buf([0; WORDS]));
 
-pub fn init() {
-    use pac::sysctl::vals::ClockMux;
-    hpm_hal::sysctl::clock_add_to_group(pac::resources::SPI1, 0);
-    hpm_hal::sysctl::clock_add_to_group(pac::resources::HDMA, 0);
-    pac::SYSCTL.clock(pac::clocks::SPI1).modify(|w| {
-        w.set_mux(ClockMux::CLK_24M);
-        w.set_div(0);
-    });
-    while pac::SYSCTL.clock(pac::clocks::SPI1).read().loc_busy() {}
-    crate::system::mark_started(crate::system::STARTED_RGB);
-    pac::IOC.pad(pac::pins::PA29).func_ctl().write(|w| w.0 = 5); // SPI1_MOSI
-    let s = pac::SPI1;
-    s.timing().write(|w| w.0 = SPI_TIMING);
-    s.trans_fmt().write(|w| w.0 = SPI_TRANS_FMT);
-    pac::DMAMUX.muxcfg(DMA_CH).write(|w| w.0 = 0x8000_0000 | DMAMUX_SPI1_TX);
-    pac::HDMA.chctrl(DMA_CH).ctrl().write(|w| w.0 = DMA_CTRL);
-    // All LEDs off at boot.
-    let off = [[0u8; 3]; LED_COUNT];
-    let _ = refresh(&off);
+/// The LED chain driver. Owns the frame buffer the DMA reads from.
+pub struct Rgb {
+    buf: &'static mut [u16; WORDS],
+    /// A frame has been started (so the channel status means something).
+    started: bool,
 }
 
-fn dma_idle() -> bool {
-    let h = pac::HDMA;
-    h.chctrl(DMA_CH).ctrl().read().0 & 1 == 0 || h.inttcsts().read().0 & (1 << DMA_CH) != 0
-}
+impl Rgb {
+    /// Set up SPI1 + HDMA channel 0 and switch all LEDs off. Call once.
+    pub fn new() -> Self {
+        use pac::sysctl::vals::ClockMux;
+        hpm_hal::sysctl::clock_add_to_group(pac::resources::SPI1, 0);
+        hpm_hal::sysctl::clock_add_to_group(pac::resources::HDMA, 0);
+        pac::SYSCTL.clock(pac::clocks::SPI1).modify(|w| {
+            w.set_mux(ClockMux::CLK_24M);
+            w.set_div(0);
+        });
+        while pac::SYSCTL.clock(pac::clocks::SPI1).read().loc_busy() {}
+        crate::system::mark_started(crate::system::STARTED_RGB);
+        pac::IOC.pad(pac::pins::PA29).func_ctl().write(|w| w.0 = 5); // SPI1_MOSI
+        let s = pac::SPI1;
+        s.timing().write(|w| w.0 = SPI_TIMING);
+        s.trans_fmt().write(|w| w.0 = SPI_TRANS_FMT);
+        pac::DMAMUX.muxcfg(DMA_CH).write(|w| w.0 = 0x8000_0000 | DMAMUX_SPI1_TX);
+        pac::HDMA.chctrl(DMA_CH).ctrl().write(|w| w.0 = DMA_CTRL);
+        let mut rgb = Self { buf: &mut BUF.take().0, started: false };
+        rgb.refresh(&[[0; 3]; LED_COUNT]);
+        rgb
+    }
 
-/// Start sending `leds` if the previous frame has finished. Returns false if still busy.
-pub fn refresh(leds: &[[u8; 3]; LED_COUNT]) -> bool {
-    unsafe {
-        if BUSY && !dma_idle() {
+    fn dma_idle() -> bool {
+        let h = pac::HDMA;
+        h.chctrl(DMA_CH).ctrl().read().0 & 1 == 0 || h.inttcsts().read().0 & (1 << DMA_CH) != 0
+    }
+
+    /// Start sending `leds` if the previous frame has finished. Returns false if still busy.
+    pub fn refresh(&mut self, leds: &[[u8; 3]; LED_COUNT]) -> bool {
+        if self.started && !Self::dma_idle() {
             return false;
         }
         let h = pac::HDMA;
         h.chctrl(DMA_CH).ctrl().write(|w| w.0 = DMA_CTRL); // disable
-        let buf = &mut *(&raw mut BUF.0);
-        let mut i = 0;
-        for &[r, g, b] in leds.iter() {
+        let mut words = self.buf.iter_mut();
+        for &[r, g, b] in leds {
             for byte in [g, r, b] {
-                for bit in (0..8).rev() {
-                    buf[i] = if byte >> bit & 1 != 0 { ONE } else { ZERO };
-                    i += 1;
+                for (bit, word) in (0..8).rev().zip(&mut words) {
+                    *word = if byte >> bit & 1 != 0 { ONE } else { ZERO };
                 }
             }
         }
-        buf[WORDS - 1] = 0;
+        self.buf[WORDS - 1] = 0;
+        // The DMA engine reads the buffer behind the compiler's back: every word must be in
+        // memory before the channel is enabled below.
+        compiler_fence(Ordering::SeqCst);
 
         let s = pac::SPI1;
         s.trans_ctrl().write(|w| w.0 = SPI_TRANS_CTRL);
@@ -95,7 +106,7 @@ pub fn refresh(leds: &[[u8; 3]; LED_COUNT]) -> bool {
         s.cmd().write(|w| w.0 = SPI_CMD_GO);
 
         let ch = h.chctrl(DMA_CH);
-        ch.src_addr().write_value(buf.as_ptr() as u32);
+        ch.src_addr().write_value(self.buf.as_ptr() as u32);
         ch.dst_addr().write_value(s.data().as_ptr() as u32);
         ch.tran_size().write(|w| w.0 = WORDS as u32);
         ch.llpointer().write(|w| w.0 = 0);
@@ -106,7 +117,7 @@ pub fn refresh(leds: &[[u8; 3]; LED_COUNT]) -> bool {
         h.intabortsts().write(|w| w.0 = m);
         h.interrsts().write(|w| w.0 = m);
         ch.ctrl().write(|w| w.0 = DMA_CTRL | 1); // enable
-        BUSY = true;
+        self.started = true;
+        true
     }
-    true
 }

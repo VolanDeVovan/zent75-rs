@@ -35,15 +35,16 @@ use static_cell::StaticCell;
 use zent_core::hid::descriptor;
 use zent_core::protocol::REPORT_SIZE;
 
-use crate::shared::{self, with_kb, STORAGE};
-use crate::{log, scan};
+use crate::{kb, log, plic, scan, StoreRef};
 
 /// USB0 binding. Not `hpm_hal::bind_interrupts!`: its handler completes through hpm-hal's
 /// `complete()`, a read-modify-write of the PLIC claim register — the read *claims* any
 /// higher-priority pending source (ADC0), which is then never serviced or completed and
-/// stops the scan for good. See `shared::plic_complete`.
+/// stops the scan for good. See `plic::complete`.
 #[derive(Copy, Clone)]
 struct Irqs;
+// SAFETY: `Binding` promises that the driver's handler runs whenever USB0 fires. The `USB0`
+// vector below does exactly that (and nothing else but the PLIC completion).
 unsafe impl hpm_hal::interrupt::typelevel::Binding<hpm_hal::interrupt::typelevel::USB0, hpm_hal::usb::InterruptHandler<peripherals::USB0>>
     for Irqs
 {
@@ -51,10 +52,13 @@ unsafe impl hpm_hal::interrupt::typelevel::Binding<hpm_hal::interrupt::typelevel
 
 #[allow(non_snake_case)]
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::USB0)]
-unsafe fn USB0() {
+fn USB0() {
     use hpm_hal::interrupt::typelevel::Handler;
-    <hpm_hal::usb::InterruptHandler<peripherals::USB0> as Handler<hpm_hal::interrupt::typelevel::USB0>>::on_interrupt();
-    shared::plic_complete(hpm_hal::interrupt::USB0);
+    // SAFETY: called from the USB0 vector only, which is the contract of `on_interrupt`.
+    unsafe {
+        <hpm_hal::usb::InterruptHandler<peripherals::USB0> as Handler<hpm_hal::interrupt::typelevel::USB0>>::on_interrupt()
+    };
+    plic::complete(hpm_hal::interrupt::USB0);
 }
 
 type Driver = UsbDriver<'static, peripherals::USB0>;
@@ -125,9 +129,7 @@ impl Handler for HidHandler {
         log!("usb: configured={} speed={}", configured, pac::USB0.portsc1().read().pspd());
         if configured {
             // Resend current state on (re)configuration.
-            scan::HID_KBD.signal(());
-            scan::HID_CONSUMER.signal(());
-            scan::HID_MOUSE.signal(());
+            scan::signal_hid();
         }
     }
 
@@ -148,7 +150,7 @@ impl Handler for HidHandler {
                 // Stock: a 1-byte output report is the keyboard LED byte (only Caps used).
                 if iface == 0 && data.len() == 1 {
                     let leds = data[0];
-                    with_kb(|kb| kb.set_host_leds(leds));
+                    kb::with(|kb| kb.set_host_leds(leds));
                 }
                 Some(OutResponse::Accepted)
             }
@@ -199,7 +201,7 @@ impl Handler for HidHandler {
 // ------------------------------------------------------------------ tasks
 
 /// Host suspended us (bus idle ≥ 3 ms)? `PORTSC1.SUSP`, polled like stock.
-fn suspended() -> bool {
+pub fn suspended() -> bool {
     pac::USB0.portsc1().read().susp()
 }
 
@@ -227,7 +229,7 @@ async fn keyboard_task(mut ep: EpIn) -> ! {
         ep.wait_enabled().await;
         scan::HID_KBD.wait().await;
         loop {
-            let h = with_kb(|kb| *kb.hid());
+            let h = kb::with(|kb| *kb.hid());
             let boot = BOOT_PROTOCOL.load(Ordering::Relaxed);
             let r = h.keyboard;
             if r == last && boot == last_boot {
@@ -252,7 +254,7 @@ async fn consumer_task(mut ep: EpIn) -> ! {
         ep.wait_enabled().await;
         scan::HID_CONSUMER.wait().await;
         loop {
-            let r = with_kb(|kb| kb.hid().consumer);
+            let r = kb::with(|kb| kb.hid().consumer);
             if r == last {
                 break;
             }
@@ -273,7 +275,7 @@ async fn mouse_task(mut ep: EpIn) -> ! {
         ep.wait_enabled().await;
         scan::HID_MOUSE.wait().await;
         loop {
-            let r = with_kb(|kb| kb.hid().mouse_report());
+            let r = kb::with(|kb| kb.hid().mouse_report());
             if r == last {
                 break;
             }
@@ -291,7 +293,7 @@ type VendorIn = Mutex<NoopRawMutex, EpIn>;
 
 /// Vendor OUT 0x03 → `Keyboard::vendor_in` → reply on IN 0x82.
 #[embassy_executor::task]
-async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn) -> ! {
+async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn, store: StoreRef) -> ! {
     let mut rx = [0u8; REPORT_SIZE];
     let mut reply = [0u8; REPORT_SIZE];
     loop {
@@ -301,11 +303,8 @@ async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn) -> ! {
             Err(_) => continue,
         };
         reply.fill(0);
-        let r = with_kb(|kb| {
-            let mut st = STORAGE.borrow_mut();
-            kb.vendor_in(&rx[..n], &mut *st, &mut reply)
-        });
-        if r.is_some() {
+        let replied = kb::with(|kb| kb.vendor_in(&rx[..n], &mut *store.borrow_mut(), &mut reply));
+        if replied.is_some() {
             let _ = tx.lock().await.write(&reply).await;
         }
     }
@@ -321,7 +320,7 @@ async fn vendor_poll_task(tx: &'static VendorIn) -> ! {
             continue;
         }
         frame.fill(0);
-        if with_kb(|kb| kb.vendor_poll(&mut frame)).is_some() {
+        if kb::with(|kb| kb.vendor_poll(&mut frame)).is_some() {
             let _ = tx.lock().await.write(&frame).await;
         }
     }
@@ -333,13 +332,15 @@ pub fn start(
     usb0: hpm_hal::Peri<'static, peripherals::USB0>,
     dm: hpm_hal::Peri<'static, peripherals::PA24>,
     dp: hpm_hal::Peri<'static, peripherals::PA25>,
+    store: StoreRef,
 ) {
-    #[unsafe(link_section = ".noncacheable")]
+    // The controller's queue heads and transfer descriptors. Plain `.bss`: all RAM of this
+    // image is DLM, which is not behind the D-cache (no `.noncacheable` placement needed).
     static EP_STATE: EndpointState = EndpointState::new();
 
     crate::system::mark_started(crate::system::STARTED_USB);
     let driver = UsbDriver::new(usb0, Irqs, dm, dp, hpm_hal::usb::Config::default(), &EP_STATE);
-    shared::set_prio(hpm_hal::interrupt::USB0, shared::PRIO_USB);
+    plic::set_priority(hpm_hal::interrupt::USB0, plic::PRIO_USB);
 
     let mut config = embassy_usb::Config::new(VID, PID);
     config.bcd_usb = embassy_usb::UsbVersion::Two;
@@ -398,6 +399,6 @@ pub fn start(
     spawner.spawn(keyboard_task(kbd)).unwrap();
     spawner.spawn(consumer_task(cons)).unwrap();
     spawner.spawn(mouse_task(mouse)).unwrap();
-    spawner.spawn(vendor_out_task(vendor_out.unwrap(), vin)).unwrap();
+    spawner.spawn(vendor_out_task(vendor_out.unwrap(), vin, store)).unwrap();
     spawner.spawn(vendor_poll_task(vin)).unwrap();
 }

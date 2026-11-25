@@ -15,9 +15,6 @@ pub const PROFILE_COUNT: usize = 4;
 /// Full scans per second.
 pub const SCAN_HZ: u32 = 8000;
 
-/// Analog-mux address driven at each step.
-pub const MUX_ADDRESS: [u8; STEP_COUNT] = [1, 2, 3, 4, 5, 9, 10, 11, 12, 13, 14];
-
 /// Value meaning "no key" in [`SLOT_TO_KEY`].
 pub const NO_KEY: u8 = 0xFF;
 
@@ -97,18 +94,6 @@ pub const LED_TO_KEY: [u8; LED_COUNT] = {
     out[5] = KEY_SPACE as u8;
     out
 };
-
-/// Row of each key (0 = function row … 5 = bottom row).
-pub const fn key_row(key: usize) -> u8 {
-    match key {
-        0..=14 => 0,
-        15..=29 => 1,
-        30..=44 => 2,
-        45..=58 => 3,
-        59..=72 => 4,
-        _ => 5,
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -36,15 +36,10 @@ pub const BANK2_LIMIT: u32 = 0x8010_0000;
 pub const BANK1_SIZE: usize = 0x790;
 /// Bytes of the bank-2 shadow (`0x1000 + 0xE38`, two NOR sectors).
 pub const BANK2_SIZE: usize = 0x1E38;
-/// Bytes of the preview area we keep: alpha[85] + rgb[85×3]. Stock keeps internal state (the
+/// Bytes of the preview area we keep: `alpha[85]` + `rgb[85×3]`. Stock keeps internal state (the
 /// preview mode, its timer and the live LED frame) right behind it and lets writes clobber it;
 /// we drop anything past this (**deviation**, safety).
 pub const PREVIEW_SIZE: usize = LED_COUNT * 4;
-
-/// Trigger addresses in the preview area: a write starting exactly here selects preview mode
-/// 1 (blend, alpha) or 2 (replace, colours).
-pub const TRIGGER_BRIGHTNESS_A: u32 = 0x8007_8000;
-pub const TRIGGER_BRIGHTNESS_B: u32 = 0x8007_8055;
 
 /// Entries of every per-key array.
 pub const KEY_SLOTS: usize = 88;
@@ -79,7 +74,7 @@ pub mod cs {
     pub const TRAVEL: usize = 0x00;
     /// u32 number of curve points (≤ 88).
     pub const POINTS: usize = 0x04;
-    /// i16[n] curve, non-decreasing, last point = [`super::CURVE_LAST`].
+    /// `i16[n]` curve, non-decreasing, last point = [`super::CURVE_LAST`].
     pub const CURVE: usize = 0x08;
     /// 64-byte UTF-8 name.
     pub const NAME: usize = 0xB8;
@@ -95,7 +90,7 @@ pub const CURVE_LAST: i16 = 2636;
 
 /// Field offsets inside bank 2.
 pub mod b2 {
-    /// i16[88] tap-hold codes of the main / Fn layer (sent after 0.5 s held), 1000 = off.
+    /// `i16[88]` tap-hold codes of the main / Fn layer (sent after 0.5 s held), 1000 = off.
     pub const HOLD_CODE: usize = 0x000;
     pub const HOLD_CODE_FN: usize = 0x0B0;
     pub const KEY_MAP: usize = 0x160;
@@ -107,21 +102,21 @@ pub mod b2 {
     pub const NORM_PRESS_TH: usize = 0x580;
     pub const NORM_RETURN_TH: usize = 0x630;
     pub const KEY_MODE: usize = 0x6E0;
-    /// u8[88], forced to `FF` on every profile load.
+    /// `u8[88]`, forced to `FF` on every profile load.
     pub const FORCED_738: usize = 0x738;
-    /// u8[88] modifier masks of the main / Fn layer, ORed into the modifier byte while the key
+    /// `u8[88]` modifier masks of the main / Fn layer, ORed into the modifier byte while the key
     /// is pressed; default 0.
     pub const MOD_MASK: usize = 0x790;
     pub const MOD_MASK_FN: usize = 0x7E8;
-    /// u16[88], forced to `FFFF` on every profile load.
+    /// `u16[88]`, forced to `FFFF` on every profile load.
     pub const FORCED_840: usize = 0x840;
-    /// u16[88] written by reset (100), no reader known.
+    /// `u16[88]` written by reset (100), no reader known.
     pub const UNK_8F0: usize = 0x8F0;
     pub const UNK_9A0: usize = 0x9A0;
     pub const KEY_CANCEL_CODE: usize = 0xA50;
     pub const RGB: usize = 0xB00;
     pub const RGB_SOLID_ENABLE: usize = 0xC08;
-    /// u8[8]: mode (effect<<2 | enable bits), H, S, brightness, speed, LED-flag mask, C66, C67.
+    /// `u8[8]`: mode (effect<<2 | enable bits), H, S, brightness, speed, LED-flag mask, C66, C67.
     pub const RGB_CONFIG: usize = 0xC60;
     pub const RGB_MODE: usize = 0xC60;
     pub const RGB_HUE: usize = 0xC61;
@@ -148,9 +143,9 @@ pub mod b2 {
 
 /// Field offsets inside a 48-byte `bind_key_setting` record (key group / DKS).
 pub mod bind {
-    /// u8[4][4]: DKS action of member `i` in phase `ph` at `4·i + ph` (0 end, 1 hold, 2 tap).
+    /// `u8[4][4]`: DKS action of member `i` in phase `ph` at `4·i + ph` (0 end, 1 hold, 2 tap).
     pub const ACTIONS: usize = 0;
-    /// i16[4] member keycodes, 1000 = unused.
+    /// `i16[4]` member keycodes, 1000 = unused.
     pub const CODES: usize = 16;
     /// u16 top / bottom trigger points, µm of travel.
     pub const TOP_POINT: usize = 24;
@@ -278,10 +273,6 @@ impl Global {
     }
     pub fn set_soft_version(&mut self, v: u32) {
         wr_u32(&mut self.0, b1::SOFT_VERSION, v)
-    }
-    /// `soft_version`: bytes `[patch, minor, major, 0]`.
-    pub fn set_version(&mut self, major: u8, minor: u8, patch: u8) {
-        self.set_soft_version(u32::from_le_bytes([patch, minor, major, 0]));
     }
     pub fn name(&self, profile: usize) -> &[u8; NAME_SIZE] {
         let o = b1::CONFIG_NAME + NAME_SIZE * profile;

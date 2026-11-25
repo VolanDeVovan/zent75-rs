@@ -122,7 +122,7 @@ pub fn delay_ms(ms: u32) {
 /// i.e. with a claimed, uncompleted source on the preemption stack).
 fn quiesce() {
     riscv::interrupt::disable();
-    unsafe { riscv::register::mie::clear_mtimer() };
+    riscv::interrupt::disable_interrupt(riscv::interrupt::Interrupt::MachineTimer);
     let plic = pac::PLIC;
     for i in 0..4 {
         plic.targetint(0).inten(i).write(|w| w.0 = 0);
@@ -174,23 +174,29 @@ pub fn enter_bootloader() -> ! {
             n += 1;
         }
     }
-    unsafe { jump_to_loader() }
+    jump_to_loader()
 }
 
 /// Andes L1 cache shutdown + jump (stock: mcctlcommand = 7 "L1D write back all", clear
 /// mcache_ctl DC_EN then IC_EN, fence.i, jr 0x80020000). Runs from ILM, so turning the
 /// I-cache off under our feet is harmless.
 #[inline(never)]
-unsafe fn jump_to_loader() -> ! {
-    core::arch::asm!(
-        "csrwi 0x7CC, 7",        // mcctlcommand: L1D_WB_ALL
-        "csrci 0x7CA, 2",        // mcache_ctl.DC_EN = 0
-        "csrci 0x7CA, 1",        // mcache_ctl.IC_EN = 0
-        "fence.i",
-        "jr {entry}",
-        entry = in(reg) LOADER_ENTRY,
-        options(noreturn),
-    );
+fn jump_to_loader() -> ! {
+    // SAFETY: control leaves this program for good, so no Rust state is observed afterwards.
+    // The target is the stock download loader's entry in the never-written boot region, which
+    // expects exactly this machine state (interrupts off, caches off — `quiesce` + the
+    // sequence below reproduce what the stock firmware does before the same jump).
+    unsafe {
+        core::arch::asm!(
+            "csrwi 0x7CC, 7",        // mcctlcommand: L1D_WB_ALL
+            "csrci 0x7CA, 2",        // mcache_ctl.DC_EN = 0
+            "csrci 0x7CA, 1",        // mcache_ctl.IC_EN = 0
+            "fence.i",
+            "jr {entry}",
+            entry = in(reg) LOADER_ENTRY,
+            options(noreturn),
+        )
+    }
 }
 
 /// PPOR software reset (stock `BE FF`): cold restart through stage-0 after 250 ms.

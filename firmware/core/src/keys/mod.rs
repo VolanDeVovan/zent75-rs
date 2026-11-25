@@ -3,9 +3,9 @@
 //!
 //! A port of the stock 0.0.18 `FUN_9D10` and its helpers (docs/re-engine.md §7–§11). The key
 //! objects are evaluated step by step after each scan, in the same order as the stock firmware,
-//! the reports are rebuilt only when something changed and "sent" (latched into [`HidState`])
+//! the reports are rebuilt only when something changed and "sent" (latched into [`HidReports`])
 //! on change, so the host sees exactly the report sequence of the stock firmware
-//! (`tests/keys_diff.rs`). Deliberate deviations are in [`crate::engine::compat`].
+//! (`tests/engine_diff.rs`). Deliberate deviations are in [`crate::engine::compat`].
 // Index loops mirror the stock per-slot / per-object tables on purpose.
 #![allow(clippy::needless_range_loop)]
 
@@ -17,10 +17,8 @@ use crate::engine::tables::{MOD_FLAG_CODES, OBJ_TO_SLOT, SLOT_TO_OBJ};
 use crate::engine::{Engine, KeyPass};
 use crate::hid::HidReports;
 use crate::keycode::{self as kc, func};
-use crate::layout::{KEY_COUNT, SLOT_COUNT, STEP_COUNT};
+use crate::layout::{SLOT_COUNT, STEP_COUNT};
 use object::{Bind, Handler, Obj};
-
-pub use object::Obj as KeyObject;
 
 /// Key objects (83 keys + 5 spare slots, like stock).
 pub const OBJ_COUNT: usize = SLOT_COUNT;
@@ -221,15 +219,9 @@ impl KeyProcessor {
     pub fn is_pressed(&self, key: usize) -> bool {
         self.objs.get(key).is_some_and(|o| o.pressed == 1)
     }
-    pub fn any_pressed(&self) -> bool {
-        self.objs.iter().any(|o| o.pressed == 1)
-    }
     /// The Fn layer is active (as of the last report rebuild).
     pub fn fn_layer(&self) -> bool {
         self.flags[0]
-    }
-    pub fn win_lock(&self) -> bool {
-        self.win_lock
     }
     /// Start the 0.9 s profile cool-down (stock: `BE C0` does this too).
     pub fn start_cooldown(&mut self) {
@@ -784,10 +776,5 @@ impl KeyProcessor {
             }
             _ => {}
         }
-    }
-
-    /// Keys 0..[`KEY_COUNT`] currently actuated.
-    pub fn pressed_keys(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..KEY_COUNT).filter(|&k| self.objs[k].pressed == 1)
     }
 }

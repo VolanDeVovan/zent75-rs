@@ -1,5 +1,5 @@
 //! The keyboard as one state machine: config banks + engine + key pipeline + lighting, plus the
-//! configurator protocol ([`vendor`]). The platform (board or simulator) owns the hardware and
+//! configurator protocol (`vendor.rs`). The platform (board or simulator) owns the hardware and
 //! drives it:
 //!
 //! ```text
@@ -248,7 +248,7 @@ impl Keyboard {
         self.pending.switch_to = Some(p);
     }
 
-    /// Fn + Esc held 5 s: erase the config (see [`Keyboard::wipe`]), blink, reboot. Carried out
+    /// Fn + Esc held 5 s: erase the config but keep the calibration, blink, reboot. Carried out
     /// by the next [`Keyboard::service`].
     pub fn request_full_wipe(&mut self) {
         self.pending.wipe = true;

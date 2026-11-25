@@ -380,24 +380,9 @@ impl Engine {
         (self.max_s[s] - self.hc[s] as i32).clamp(0, self.max_s[s]) as u16
     }
 
-    /// Power-up baseline of a key (words 249–331).
-    pub fn power_up_baseline(&self, key: usize) -> i32 {
-        self.rest0[OBJ_TO_SLOT[key] as usize]
-    }
-
     /// Full travel of object `obj` (µm).
     pub fn max_travel(&self, obj: usize) -> i32 {
         self.max_s[OBJ_TO_SLOT[obj] as usize]
-    }
-
-    /// Plain curve height `hC` of a key (µm, max at rest).
-    pub fn height(&self, key: usize) -> i32 {
-        self.hc[OBJ_TO_SLOT[key] as usize] as i32
-    }
-
-    /// Current span (`(top − bottom − 2·dz)·65536/2636`) of a key.
-    pub fn span(&self, key: usize) -> i32 {
-        self.span[OBJ_TO_SLOT[key] as usize]
     }
 
     /// Auto-calibration bottom reference of a key (ADC counts; starts at the stored bottom).
@@ -408,11 +393,6 @@ impl Engine {
     /// Dynamic rest baseline of a key (ADC counts).
     pub fn rest_baseline(&self, key: usize) -> i32 {
         self.base[OBJ_TO_SLOT[key] as usize]
-    }
-
-    /// Per-scan velocity of a key (`hC` change, µm/scan, positive while pressing).
-    pub fn velocity(&self, key: usize) -> i16 {
-        self.vel[OBJ_TO_SLOT[key] as usize]
     }
 
     // ------------------------------------------------------------------ scan

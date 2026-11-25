@@ -18,8 +18,13 @@
 //! Slot numbering: `slot = step × 8 + position`, positions interleaved
 //! `[ADC0 ch1, ADC1 ch2, ADC0 ch3, ADC1 ch4, ADC0 ch5, ADC1 ch6, ADC0 ch7, ADC1 ch11]`
 //! (docs/hardware.md). See [`STEP_OFFSET`] for the open one-step question.
+//!
+//! **Shared memory.** Everything the two handlers and the tasks share is an atomic: on this
+//! single-hart RV32 a relaxed load/store is one plain instruction, and it lets the buffers be
+//! ordinary `static`s. The DMA targets are atomics for the same reason — the hardware rewrites
+//! them behind the compiler's back, and an atomic load is always a real load.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering::Relaxed};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
@@ -27,7 +32,7 @@ use hpm_hal::interrupt::InterruptExt;
 use hpm_hal::pac;
 use zent_core::layout::{INPUTS_PER_STEP, SLOT_COUNT, STEP_COUNT};
 
-use crate::shared;
+use crate::{kb, plic};
 
 /// **Step ↔ sample association.** The samples captured after the trigger in PWM step `k`
 /// are filed as scan step `(k + STEP_OFFSET) % 11`. `0` = "a sample belongs to the address that
@@ -78,28 +83,77 @@ const INT_SEQ_HW_CFLCT: u32 = 1 << 26;
 
 // ------------------------------------------------------------------ shared buffers
 
+/// Circular sequence-DMA target of one ADC: 16 result words, rewritten by the hardware after
+/// every trigger and only ever read by the CPU.
 #[repr(C, align(64))]
-struct DmaBuf([u32; 16]);
-static mut ADC0_DMA: DmaBuf = DmaBuf([0; 16]);
-static mut ADC1_DMA: DmaBuf = DmaBuf([0; 16]);
+struct DmaBuf([AtomicU32; 16]);
 
-/// Ping-pong frames: the ADC ISR fills `FRAMES[w]`; on step 10 it publishes `w` and switches.
-static mut FRAMES: [[u16; SLOT_COUNT]; 2] = [[0; SLOT_COUNT]; 2];
-static mut WRITE_IDX: usize = 0;
+impl DmaBuf {
+    const fn new() -> Self {
+        Self([const { AtomicU32::new(0) }; 16])
+    }
+    /// Bus address for `seq_dma_addr`.
+    fn address(&'static self) -> u32 {
+        self.0.as_ptr() as u32
+    }
+    /// The four conversions of each of the four sequence inputs.
+    #[inline(always)]
+    fn inputs(&self) -> &[[AtomicU32; 4]; 4] {
+        self.0.as_chunks().0.try_into().unwrap()
+    }
+    /// Channel number recorded with the last conversion of the sequence.
+    #[inline(always)]
+    fn last_channel(&self) -> u32 {
+        (self.0[15].load(Relaxed) >> 20) & 0x1F
+    }
+}
+
+/// Mean of conversions 1..3 of one input (the first one is discarded, like stock).
+#[inline(always)]
+fn avg3([_, a, b, c]: &[AtomicU32; 4]) -> u16 {
+    (((a.load(Relaxed) & 0xFFFF) + (b.load(Relaxed) & 0xFFFF) + (c.load(Relaxed) & 0xFFFF)) / 3) as u16
+}
+
+static ADC0_DMA: DmaBuf = DmaBuf::new();
+static ADC1_DMA: DmaBuf = DmaBuf::new();
+
+type Frame = [AtomicU16; SLOT_COUNT];
+/// Ping-pong frames: the ADC handler fills `FRAMES[WRITE_IDX]`; on step 10 it publishes that
+/// index and switches to the other frame.
+static FRAMES: [Frame; 2] = [const { [const { AtomicU16::new(0) }; SLOT_COUNT] }; 2];
 static READY_IDX: AtomicU32 = AtomicU32::new(0);
 /// Incremented once per published frame (seqlock for the reader).
 static READY_SEQ: AtomicU32 = AtomicU32::new(0);
-static mut LAST_DONE: u32 = 0;
-static mut LAST_GEN: u32 = 0;
-static mut IN_PROCESS: bool = false;
+
+// State of the ADC0 handler (it never nests into itself).
+static WRITE_IDX: AtomicU32 = AtomicU32::new(0);
+static STEPS_SEEN: AtomicU32 = AtomicU32::new(0);
+
+// State of the GPTMR1 handler.
+static IN_PROCESS: AtomicBool = AtomicBool::new(false);
+/// `READY_SEQ` of the last frame processed.
+static LAST_DONE: AtomicU32 = AtomicU32::new(0);
+/// `Keyboard::hid_generation` last announced to the USB tasks. Written only when it moves —
+/// the emu gate watches this symbol for writes.
+static LAST_GEN: AtomicU32 = AtomicU32::new(0);
 
 /// Raised whenever `Keyboard::hid_generation()` moves (one per HID IN endpoint task).
 pub static HID_KBD: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static HID_CONSUMER: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static HID_MOUSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
+/// Tell the HID endpoint tasks to look at the reports again.
+pub fn signal_hid() {
+    HID_KBD.signal(());
+    HID_CONSUMER.signal(());
+    HID_MOUSE.signal(());
+}
+
 // ------------------------------------------------------------------ statistics
 
+/// Counters for the console and the emu gate, which reads this struct by layout: keep the
+/// field order (`firmware/emu/run.py`, `STATS_FIELDS`).
+#[repr(C)]
 pub struct Stats {
     pub scans: AtomicU32,
     pub dropped: AtomicU32,
@@ -131,8 +185,6 @@ pub static STATS: Stats = Stats {
     seq_min: AtomicU32::new(u32::MAX),
     seq_max: AtomicU32::new(0),
 };
-static mut STEPS_SEEN: u16 = 0;
-static RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[inline(always)]
 fn cycles() -> u32 {
@@ -172,8 +224,8 @@ pub fn start(adc0: hpm_hal::Peri<'static, hpm_hal::peripherals::ADC0>, adc1: hpm
     let _ = hpm_hal::adc::Adc::new(adc0, cfg);
     let _ = hpm_hal::adc::Adc::new(adc1, cfg);
     for (adc, chans, buf) in [
-        (pac::ADC0, ADC0_CH, (&raw const ADC0_DMA) as u32),
-        (pac::ADC1, ADC1_CH, (&raw const ADC1_DMA) as u32),
+        (pac::ADC0, ADC0_CH, ADC0_DMA.address()),
+        (pac::ADC1, ADC1_CH, ADC1_DMA.address()),
     ] {
         adc.conv_cfg1().write(|w| w.0 = 0x153); // 16-bit, AHB/4
         adc.adc_cfg0().write(|w| w.0 = 0xA000_0000); // adc_ahb_en, sel_sync_ahb
@@ -235,17 +287,12 @@ pub fn start(adc0: hpm_hal::Peri<'static, hpm_hal::peripherals::ADC0>, adc1: hpm
     t.irqen().write(|w| w.0 = 1); // ch0 reload
 
     // Interrupts: ADC0 captures (ADC1 is polled from the same ISR), GPTMR1 processes.
-    shared::set_prio(hpm_hal::interrupt::ADC0, shared::PRIO_ADC);
-    shared::set_prio(hpm_hal::interrupt::GPTMR1, shared::PRIO_SCAN);
     hpm_hal::interrupt::ADC1.disable();
-    unsafe {
-        hpm_hal::interrupt::GPTMR1.enable();
-        hpm_hal::interrupt::ADC0.enable();
-    }
+    plic::enable(hpm_hal::interrupt::GPTMR1, plic::PRIO_SCAN);
+    plic::enable(hpm_hal::interrupt::ADC0, plic::PRIO_ADC);
 
     crate::system::mark_started(crate::system::STARTED_SCAN);
     // Start both timers back to back (stock: not hardware-synchronised either).
-    RUNNING.store(true, Ordering::Release);
     p0.sta().write(|w| w.0 = 0);
     p1.sta().write(|w| w.0 = 0);
     p0.gcr().write(|w| w.0 = 0x80); // cen
@@ -270,29 +317,29 @@ fn decode_step(cnt: u32) -> (usize, u32) {
     (k, late)
 }
 
-#[inline(always)]
-fn avg3(b: &[u32; 16], input: usize) -> u16 {
-    let i = input * 4;
-    let s = (b[i + 1] & 0xFFFF) + (b[i + 2] & 0xFFFF) + (b[i + 3] & 0xFFFF);
-    (s / 3) as u16
-}
-
 fn stat_max(a: &AtomicU32, v: u32) {
-    if v > a.load(Ordering::Relaxed) {
-        a.store(v, Ordering::Relaxed);
+    if v > a.load(Relaxed) {
+        a.store(v, Relaxed);
     }
 }
 fn stat_min(a: &AtomicU32, v: u32) {
-    if v < a.load(Ordering::Relaxed) {
-        a.store(v, Ordering::Relaxed);
+    if v < a.load(Relaxed) {
+        a.store(v, Relaxed);
     }
 }
 
 /// ADC0 sequence complete: capture one mux step. Highest priority, runs from ILM, ~1 µs.
 #[allow(non_snake_case)]
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::ADC0)]
-unsafe fn ADC0() {
+fn ADC0() {
     let c0 = cycles();
+    capture_step();
+    stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
+    plic::complete(hpm_hal::interrupt::ADC0);
+}
+
+#[inline(always)]
+fn capture_step() {
     let cnt = pac::PWM0.cnt().read().cnt();
     let s0 = pac::ADC0.int_sts().read().0;
     pac::ADC0.int_sts().write(|w| w.0 = s0);
@@ -302,118 +349,119 @@ unsafe fn ADC0() {
     while pac::ADC1.int_sts().read().0 & INT_SEQ_CVC == 0 {
         spins += 1;
         if spins > 1000 {
-            STATS.adc1_late.fetch_add(1, Ordering::Relaxed);
+            STATS.adc1_late.fetch_add(1, Relaxed);
             break;
         }
     }
     let s1 = pac::ADC1.int_sts().read().0;
     pac::ADC1.int_sts().write(|w| w.0 = s1);
     if (s0 | s1) & INT_SEQ_HW_CFLCT != 0 {
-        STATS.hw_conflict.fetch_add(1, Ordering::Relaxed);
+        STATS.hw_conflict.fetch_add(1, Relaxed);
     }
 
     let (k, late) = decode_step(cnt);
     stat_min(&STATS.seq_min, late);
     stat_max(&STATS.seq_max, late);
 
-    let b0 = &*(&raw const ADC0_DMA.0);
-    let b1 = &*(&raw const ADC1_DMA.0);
     // Sanity: the last word of each buffer must be the last channel of the sequence.
-    if (b0[15] >> 20) & 0x1F != ADC0_CH[3] as u32 || (b1[15] >> 20) & 0x1F != ADC1_CH[3] as u32 {
-        STATS.bad_channel.fetch_add(1, Ordering::Relaxed);
+    if ADC0_DMA.last_channel() != ADC0_CH[3] as u32 || ADC1_DMA.last_channel() != ADC1_CH[3] as u32 {
+        STATS.bad_channel.fetch_add(1, Relaxed);
     }
-    let w = WRITE_IDX;
+    let w = WRITE_IDX.load(Relaxed);
     let step = (k + STEP_OFFSET) % STEP_COUNT;
-    let frame = &mut *(&raw mut FRAMES[w]);
-    let base = step * INPUTS_PER_STEP;
-    for i in 0..4 {
-        frame[base + 2 * i] = avg3(b0, i);
-        frame[base + 2 * i + 1] = avg3(b1, i);
+    let slots = &FRAMES[w as usize & 1][step * INPUTS_PER_STEP..][..INPUTS_PER_STEP];
+    for ((pair, in0), in1) in slots.as_chunks::<2>().0.iter().zip(ADC0_DMA.inputs()).zip(ADC1_DMA.inputs()) {
+        pair[0].store(avg3(in0), Relaxed);
+        pair[1].store(avg3(in1), Relaxed);
     }
-    STEPS_SEEN |= 1 << k;
+    let seen = STEPS_SEEN.load(Relaxed) | 1 << k;
+    STEPS_SEEN.store(seen, Relaxed);
 
     if k == STEP_COUNT - 1 {
-        let seen = STEPS_SEEN.count_ones();
-        STEPS_SEEN = 0;
+        STEPS_SEEN.store(0, Relaxed);
+        let seen = seen.count_ones();
         if seen != STEP_COUNT as u32 {
-            STATS.steps_missing.fetch_add(1, Ordering::Relaxed);
+            STATS.steps_missing.fetch_add(1, Relaxed);
         }
         // Publish only plausible frames: if step decoding ever breaks (e.g. the PWM0 counter
         // reads a constant) we must not run Keyboard::scan once per *step* and starve the
         // executor; the scan then stops visibly (console `scan 0/s`, `miss` counting up).
         if seen < STEP_COUNT as u32 - 1 {
-            stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
-            shared::plic_complete(hpm_hal::interrupt::ADC0);
             return;
         }
-        READY_IDX.store(w as u32, Ordering::Relaxed);
-        READY_SEQ.fetch_add(1, Ordering::Release);
-        WRITE_IDX = w ^ 1;
+        READY_IDX.store(w, Relaxed);
+        READY_SEQ.fetch_add(1, Relaxed);
+        WRITE_IDX.store(w ^ 1, Relaxed);
         kick_processing();
     }
-    stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
-    shared::plic_complete(hpm_hal::interrupt::ADC0);
 }
 
 /// Deferred frame processing (stock's GPTMR1 trick). Preemptible by ADC0 and USB0.
 #[allow(non_snake_case)]
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::GPTMR1)]
-unsafe fn GPTMR1() {
+fn GPTMR1() {
     let t = pac::GPTMR1;
     t.channel(0).cr().write(|w| w.0 = 0x208); // stop
     t.sr().write(|w| w.0 = 1);
     // With PLIC preemption the gateway never re-delivers a claimed source, so this handler
     // cannot nest into itself. Guard anyway (cheap): a nested entry just returns, the running
     // instance loops until it has consumed the newest frame.
-    if IN_PROCESS {
-        shared::plic_complete(hpm_hal::interrupt::GPTMR1);
-        return;
+    if !IN_PROCESS.load(Relaxed) {
+        IN_PROCESS.store(true, Relaxed); // MIE is still off: no window between load and store
+        // SAFETY: nesting. From here the PLIC (preemptive mode) delivers only sources above
+        // this handler's priority — ADC0 and USB0, which share nothing with it but atomics —
+        // and the entry/exit code of `external_interrupt` saves and restores mepc/mstatus.
+        unsafe { riscv::interrupt::enable() };
+        process_frames();
+        riscv::interrupt::disable();
+        IN_PROCESS.store(false, Relaxed);
     }
-    IN_PROCESS = true;
-    riscv::interrupt::enable(); // nesting: higher PLIC priorities may preempt from here
+    plic::complete(hpm_hal::interrupt::GPTMR1);
+}
 
+/// Run `Keyboard::scan` on every frame published since the last call (normally one).
+#[inline(always)]
+fn process_frames() {
     let mut frame = [0u16; SLOT_COUNT];
     loop {
-        let seq = READY_SEQ.load(Ordering::Acquire);
-        if seq == LAST_DONE {
+        let seq = READY_SEQ.load(Relaxed);
+        let last = LAST_DONE.load(Relaxed);
+        if seq == last {
             break;
         }
-        let idx = READY_IDX.load(Ordering::Relaxed) as usize;
-        frame.copy_from_slice(&*(&raw const FRAMES[idx]));
-        if READY_SEQ.load(Ordering::Acquire) != seq {
+        let published = &FRAMES[READY_IDX.load(Relaxed) as usize & 1];
+        for (dst, src) in frame.iter_mut().zip(published) {
+            *dst = src.load(Relaxed);
+        }
+        if READY_SEQ.load(Relaxed) != seq {
             continue; // a newer frame was published while copying: take that one
         }
-        let missed = seq.wrapping_sub(LAST_DONE).wrapping_sub(1);
-        if missed != 0 && LAST_DONE != 0 {
-            STATS.dropped.fetch_add(missed, Ordering::Relaxed);
+        let missed = seq.wrapping_sub(last).wrapping_sub(1);
+        if missed != 0 && last != 0 {
+            STATS.dropped.fetch_add(missed, Relaxed);
         }
-        LAST_DONE = seq;
+        LAST_DONE.store(seq, Relaxed);
 
         let c0 = cycles();
-        let kb = shared::kb_from_scan_isr();
-        kb.scan(&frame);
-        let gen = kb.hid_generation();
+        let gen = kb::with(|kb| {
+            kb.scan(&frame);
+            kb.hid_generation()
+        });
         let dc = cycles().wrapping_sub(c0);
         stat_max(&STATS.proc_cyc_max, dc);
-        STATS.proc_cyc_sum.fetch_add(dc, Ordering::Relaxed);
-        STATS.proc_n.fetch_add(1, Ordering::Relaxed);
-        SEC_CYC.fetch_add(dc, Ordering::Relaxed);
-        STATS.scans.fetch_add(1, Ordering::Relaxed);
-        if gen != LAST_GEN {
-            LAST_GEN = gen;
-            HID_KBD.signal(());
-            HID_CONSUMER.signal(());
-            HID_MOUSE.signal(());
+        STATS.proc_cyc_sum.fetch_add(dc, Relaxed);
+        STATS.proc_n.fetch_add(1, Relaxed);
+        SEC_CYC.fetch_add(dc, Relaxed);
+        STATS.scans.fetch_add(1, Relaxed);
+        if gen != LAST_GEN.load(Relaxed) {
+            LAST_GEN.store(gen, Relaxed);
+            signal_hid();
         }
     }
-
-    riscv::interrupt::disable();
-    IN_PROCESS = false;
-    shared::plic_complete(hpm_hal::interrupt::GPTMR1);
 }
 
 /// Snapshot of the latest published frame (for diagnostics).
 pub fn last_frame() -> [u16; SLOT_COUNT] {
-    let idx = READY_IDX.load(Ordering::Relaxed) as usize;
-    unsafe { *(&raw const FRAMES[idx]) }
+    let published = &FRAMES[READY_IDX.load(Relaxed) as usize & 1];
+    core::array::from_fn(|i| published[i].load(Relaxed))
 }

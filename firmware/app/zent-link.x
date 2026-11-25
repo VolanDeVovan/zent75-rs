@@ -13,7 +13,7 @@
  *     XIP flash. ALL other code (`.text*`, the trap/vector code) goes to ILM (`.fast`), and ALL
  *     read-only data goes to DLM (inside `.data`). The startup asm copies both before any Rust
  *     code runs. Consequence: once `_hpm_start_rust` is entered the CPU never fetches from or
- *     loads from the XIP window, so erasing/programming the NOR (src/flash.rs) is safe with
+ *     loads from the XIP window, so erasing/programming the NOR (src/flash.rs, hpm-hal's ROM-API driver) is safe with
  *     interrupts enabled - the 8 kHz scan keeps running during config saves - and there are no
  *     XIP cache-miss stalls in the scan ISR. `package-uf2.sh` checks that the XIP `.text` stays
  *     tiny (a regression here would make flash writes crash the firmware).

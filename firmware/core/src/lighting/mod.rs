@@ -13,10 +13,12 @@
 //! hits, then render the effect in passes of 17 LEDs (or one pass for some effects) and apply
 //! the overlays after *every* pass, in stock order:
 //!
-//! 1. board-calibration indicator (replaces everything below),
-//! 2. Fn layer (Fn held + `rgb_fn_enable`) — else live preview mode 1/2 or static colours,
-//! 3. Caps Lock red, 4. WinLock red (Fn not held, `C70` = 1), 5. sleep blanking,
-//! 6. the profile-switch blink, overriding everything.
+//! 1. Fn layer (Fn held + `rgb_fn_enable`) — else live preview mode 1/2 or static colours,
+//! 2. Caps Lock red, 3. WinLock red (Fn not held, `C70` = 1), 4. sleep blanking,
+//! 5. the profile-switch blink, overriding everything.
+//!
+//! Stock has one more overlay on top, the indicator of its board-side calibration routine
+//! (hold C at power-up); that routine is not part of this firmware.
 //!
 //! Effects draw into a persistent LED buffer that the overlays also write (effects that only
 //! touch some LEDs therefore keep overlay colours, as on stock). The frame is flushed — with
@@ -30,7 +32,7 @@ mod effects;
 pub mod geometry;
 pub mod math;
 
-use crate::config::{Global, Profile};
+use crate::config::{Global, Profile, PREVIEW_SIZE};
 use crate::engine::Engine;
 use crate::hid::host_led;
 use crate::keycode as kc;
@@ -133,11 +135,10 @@ pub struct Lighting {
     fn_held: bool,
     idle_scans: u32,
     winlock: bool,
-    calibration: Option<[bool; KEY_COUNT]>,
     wipe_blink: Option<bool>,
     blink: Option<(u8, Option<u32>)>,
     // live preview (bank address 0x80078000: alpha[85], rgb[85×3])
-    preview: [u8; LED_COUNT * 4],
+    preview: [u8; PREVIEW_SIZE],
     preview_mode: u8,
     preview_age: u32,
 }
@@ -189,10 +190,9 @@ impl Lighting {
             fn_held: false,
             idle_scans: 0,
             winlock: false,
-            calibration: None,
             wipe_blink: None,
             blink: None,
-            preview: [0; LED_COUNT * 4],
+            preview: [0; PREVIEW_SIZE],
             preview_mode: 0,
             preview_age: 0,
         }
@@ -234,11 +234,6 @@ impl Lighting {
     }
     pub fn winlock(&self) -> bool {
         self.winlock
-    }
-    /// Board-side calibration indicator (stock's C-at-boot routine): `Some(accepted)` makes
-    /// accepted keys blink red and everything else dark.
-    pub fn set_board_calibration(&mut self, accepted: Option<[bool; KEY_COUNT]>) {
-        self.calibration = accepted;
     }
     /// Full-wipe feedback: `Some(true)` all LEDs (60,60,60), `Some(false)` all dark, `None`
     /// normal lighting.
@@ -346,7 +341,7 @@ impl Lighting {
 
     // ------------------------------------------------------------------ live preview
 
-    /// `BE 03` into the preview area at byte offset `off` (0 = alpha[85], 0x55 = rgb[85×3]).
+    /// `BE 03` into the preview area at byte offset `off` (0 = `alpha[85]`, 0x55 = `rgb[85×3]`).
     /// Starting exactly at 0 selects blend mode 1, exactly at 0x55 replace mode 2; mode 2
     /// colours are colour-corrected and scaled by the current V in place (on every write, as
     /// stock). Anything past the 340-byte area is dropped.
@@ -627,58 +622,50 @@ impl Lighting {
     }
 
     fn overlays(&mut self, t: u32, p: &Profile) {
-        if let Some(acc) = self.calibration {
-            let on = if t % 2000 > 1000 { 255 } else { 0 };
+        let fn_layer = p.fn_highlight() && self.fn_held;
+        if fn_layer {
+            let v = self.p.v;
             for led in 0..LED_COUNT {
                 let key = LED_TO_KEY[led] as usize;
-                self.leds[led] = if acc[key] { [on, 0, 0] } else { [0; 3] };
+                self.leds[led] = if p.key_map_fn(key) == kc::NONE { [0; 3] } else { [v, v, v] };
+            }
+        } else if self.preview_mode == 1 {
+            for led in 0..LED_COUNT {
+                let a = self.preview[led] as u32;
+                let s = self.statics[led];
+                let e = self.leds[led];
+                self.leds[led] = core::array::from_fn(|j| ((s[j] as u32 * a + e[j] as u32 * (255 - a)) / 255) as u8);
+            }
+        } else if self.preview_mode == 2 {
+            for led in 0..LED_COUNT {
+                let o = LED_COUNT + 3 * led;
+                self.leds[led] = [self.preview[o], self.preview[o + 1], self.preview[o + 2]];
             }
         } else {
-            let fn_layer = p.fn_highlight() && self.fn_held;
-            if fn_layer {
-                let v = self.p.v;
-                for led in 0..LED_COUNT {
-                    let key = LED_TO_KEY[led] as usize;
-                    self.leds[led] = if p.key_map_fn(key) == kc::NONE { [0; 3] } else { [v, v, v] };
-                }
-            } else if self.preview_mode == 1 {
-                for led in 0..LED_COUNT {
-                    let a = self.preview[led] as u32;
-                    let s = self.statics[led];
-                    let e = self.leds[led];
-                    self.leds[led] = core::array::from_fn(|j| ((s[j] as u32 * a + e[j] as u32 * (255 - a)) / 255) as u8);
-                }
-            } else if self.preview_mode == 2 {
-                for led in 0..LED_COUNT {
-                    let o = LED_COUNT + 3 * led;
-                    self.leds[led] = [self.preview[o], self.preview[o + 1], self.preview[o + 2]];
-                }
-            } else {
-                for led in 0..LED_COUNT {
-                    if self.solid[led] {
-                        self.leds[led] = self.statics[led];
-                    }
+            for led in 0..LED_COUNT {
+                if self.solid[led] {
+                    self.leds[led] = self.statics[led];
                 }
             }
-            if p.caps_indicator() && self.host_leds & host_led::CAPS_LOCK != 0 {
-                for led in 0..LED_COUNT {
-                    if p.key_map(LED_TO_KEY[led] as usize) == kc::CAPS_LOCK {
-                        self.leds[led] = [255, 0, 0];
-                    }
+        }
+        if p.caps_indicator() && self.host_leds & host_led::CAPS_LOCK != 0 {
+            for led in 0..LED_COUNT {
+                if p.key_map(LED_TO_KEY[led] as usize) == kc::CAPS_LOCK {
+                    self.leds[led] = [255, 0, 0];
                 }
             }
-            if self.winlock && !self.fn_held && p.win_lock_indicator() {
-                for led in 0..LED_COUNT {
-                    let c = p.key_map(LED_TO_KEY[led] as usize);
-                    if c == kc::LWIN || c == kc::RWIN {
-                        self.leds[led] = [255, 0, 0];
-                    }
+        }
+        if self.winlock && !self.fn_held && p.win_lock_indicator() {
+            for led in 0..LED_COUNT {
+                let c = p.key_map(LED_TO_KEY[led] as usize);
+                if c == kc::LWIN || c == kc::RWIN {
+                    self.leds[led] = [255, 0, 0];
                 }
             }
-            let sleep = self.sleep_seconds as i32;
-            if sleep > 0 && (sleep as u32) < self.idle_seconds() {
-                self.set_all([0; 3]);
-            }
+        }
+        let sleep = self.sleep_seconds as i32;
+        if sleep > 0 && (sleep as u32) < self.idle_seconds() {
+            self.set_all([0; 3]);
         }
         if let Some((prof, start)) = self.blink {
             let start = start.unwrap_or(t);

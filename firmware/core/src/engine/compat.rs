@@ -3,7 +3,7 @@
 //! Every vendor bug we fix is a field of [`Compat`] with the stock behaviour described next to
 //! it. [`Compat::FIXED`] (the default) is what the firmware runs; [`Compat::STOCK`] reproduces
 //! the vendor behaviour bit for bit so the differential tests against the emulated stock engine
-//! (`tests/engine_*.rs`, `tests/keys_*.rs`) can replay traces with exact equality.
+//! (`tests/engine_diff.rs`, `tests/engine_fixed.rs`) can replay traces with exact equality.
 //!
 //! Stock behaviours that are not reproduced because nothing observable depends on them:
 //!

@@ -55,7 +55,9 @@ fn parse_args() -> Result<Args, String> {
         socket: std::env::var_os("XDG_RUNTIME_DIR")
             .map(|d| PathBuf::from(d).join("zent75-sim.sock"))
             .unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("zent75-sim-{}.sock", unsafe { libc::getuid() }))
+                // SAFETY: getuid() has no preconditions and cannot fail.
+                let uid = unsafe { libc::getuid() };
+                std::env::temp_dir().join(format!("zent75-sim-{uid}.sock"))
             }),
         script: None,
         stay: false,

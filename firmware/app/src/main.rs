@@ -8,30 +8,37 @@
 
 mod console;
 mod flash;
-// `&*(&raw const STATIC)` is deliberate in these two: it avoids references to `static mut`
-// (static_mut_refs), which is what clippy would suggest instead.
-#[allow(clippy::deref_addrof)]
+mod kb;
+mod plic;
 mod rgb;
-#[allow(clippy::deref_addrof)]
 mod scan;
-mod shared;
 mod system;
 mod usb;
 
+use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 
 use embassy_executor::Spawner;
 use embassy_time::{Instant, Timer};
 use hpm_hal as hal;
+use static_cell::ConstStaticCell;
 use zent_core::device::SystemAction;
 use zent_core::layout::LED_COUNT;
 
-use crate::shared::{with_kb, STORAGE};
+use crate::flash::{RomNor, Store};
 
 /// TinyUF2 boot signature at 0x80040000 (`zent-link.x`, section `.app_signature`).
+// SAFETY: the section holds exactly this word (asserted by the linker script); stage-0 only
+// reads it.
 #[used]
 #[unsafe(link_section = ".app_signature")]
 static APP_BOOT_SIGNATURE: u32 = 0x0B4D_5475;
+
+/// Config-bank storage, shared by the thread-mode tasks only (a `RefCell`, handed out once
+/// by `main`). Initialised at link time: its two bank images never pass over the stack.
+static STORE: ConstStaticCell<RefCell<Store>> = ConstStaticCell::new(RefCell::new(Store::new(RomNor::new())));
+/// The thread-mode handle to [`STORE`].
+pub type StoreRef = &'static RefCell<Store>;
 
 /// Config saves are debounced: a burst of `BE 03` writes becomes one erase per slot.
 const SAVE_DEBOUNCE_MS: u64 = 300;
@@ -58,8 +65,8 @@ async fn console_task() {
 }
 
 /// Write pending config, then perform a reset / bootloader request.
-fn system_action(a: SystemAction) -> ! {
-    let n = STORAGE.borrow_mut().commit(0, 0, true);
+fn system_action(a: SystemAction, store: StoreRef) -> ! {
+    let n = store.borrow_mut().commit(0, 0, true);
     log!("system action {:?} (flushed {} slot(s))", a, n);
     console::flush_blocking();
     match a {
@@ -70,35 +77,41 @@ fn system_action(a: SystemAction) -> ! {
 
 /// Deferred work: `Keyboard::service`, system actions, debounced flash commits.
 #[embassy_executor::task]
-async fn service_task() {
+async fn service_task(store: StoreRef) {
+    let mut reported = store.borrow().stats();
     loop {
         Timer::after_millis(5).await;
-        let action = with_kb(|kb| {
-            kb.service(&mut *STORAGE.borrow_mut());
+        let action = kb::with(|kb| {
+            kb.service(&mut *store.borrow_mut());
             kb.take_system_action()
         });
         if let Some(a) = action {
-            system_action(a);
+            system_action(a, store);
         }
         // Outside the keyboard lock: erasing a sector blocks this executor for ~45 ms while
         // scanning continues in the interrupts.
         let now = Instant::now().as_millis();
-        STORAGE.borrow_mut().commit(now, SAVE_DEBOUNCE_MS, false);
+        store.borrow_mut().commit(now, SAVE_DEBOUNCE_MS, false);
+        let stats = store.borrow().stats();
+        if stats != reported {
+            reported = stats;
+            log!("flash: {} slot(s) saved, {} failed, {} refused since boot", stats.commits, stats.errors, stats.refused);
+        }
     }
 }
 
 #[embassy_executor::task]
-async fn rgb_task() {
+async fn rgb_task(mut rgb: rgb::Rgb) {
     let mut leds = [[0u8; 3]; LED_COUNT];
     loop {
         Timer::after_millis(RGB_PERIOD_MS).await;
         let now = Instant::now().as_millis() as u32;
-        let susp = hal::pac::USB0.portsc1().read().susp();
-        with_kb(|kb| {
+        let susp = usb::suspended();
+        kb::with(|kb| {
             kb.set_usb_suspended(susp);
             kb.render_leds(now, &mut leds);
         });
-        rgb::refresh(&leds);
+        rgb.refresh(&leds);
     }
 }
 
@@ -116,7 +129,7 @@ async fn health_task() {
             // BE FD tail: scans/s, engine busy per mille, uptime (stock words 499-504)
             let cyc = scan::SEC_CYC.swap(0, Ordering::Relaxed);
             let busy = (cyc / (cpu_mhz * 1000).max(1)).min(1000) as u16;
-            with_kb(|kb| kb.second_tick(busy));
+            kb::with(|kb| kb.second_tick(busy));
         }
         if tick % 20 != 0 {
             continue;
@@ -155,17 +168,15 @@ async fn health_task() {
     }
 }
 
-/// Load the config banks into the static keyboard (in place, see `shared::KB`).
+/// Load the config banks into the static keyboard (in place, see `kb`). Nothing else uses
+/// the keyboard yet: the scan interrupt and the USB tasks start afterwards.
 #[inline(never)]
-fn boot_keyboard(uid: [u8; 16]) {
-    shared::kb_boot(|kb| {
-        kb.boot(uid, &mut *STORAGE.borrow_mut());
-        log!(
-            "config: active profile {}, defaults written for empty slots: {}",
-            kb.active_profile(),
-            STORAGE.borrow_mut().dirty()
-        );
+fn boot_keyboard(uid: [u8; 16], store: StoreRef) {
+    let active = kb::with(|kb| {
+        kb.boot(uid, &mut *store.borrow_mut());
+        kb.active_profile()
     });
+    log!("config: active profile {}, defaults written for empty slots: {}", active, store.borrow().dirty());
 }
 
 #[embassy_executor::main(entry = "hpm_hal::entry")]
@@ -182,26 +193,27 @@ async fn main(spawner: Spawner) -> ! {
     log!("cpu {} Hz, ahb {} Hz", clk.cpu0.0, clk.ahb.0);
     system::check_reset_cause(); // may divert to the UF2 loader after a watchdog reset
     system::watchdog_start(p.EWDG0);
-    shared::setup_plic();
+    plic::setup();
     spawner.spawn(console_task()).unwrap();
 
-    match flash::init() {
-        Ok((total, sector, page)) => log!("flash: {} B, sector {} B, page {} B", total, sector, page),
+    let store: StoreRef = STORE.take();
+    match store.borrow_mut().nor().init(p.XPI0) {
+        Ok(()) => log!("flash: 1 MB NOR ready"),
         Err(e) => log!("flash: init FAILED {:?} - config writes disabled", e),
     }
     let uid = flash::read_uid();
     log!("uid {:02x?}", uid);
 
-    boot_keyboard(uid);
+    boot_keyboard(uid, store);
 
-    rgb::init();
+    let rgb = rgb::Rgb::new();
     scan::start(p.ADC0, p.ADC1);
     log!("scan started");
-    usb::start(spawner, p.USB0, p.PA24, p.PA25);
+    usb::start(spawner, p.USB0, p.PA24, p.PA25, store);
     log!("usb started");
 
-    spawner.spawn(service_task()).unwrap();
-    spawner.spawn(rgb_task()).unwrap();
+    spawner.spawn(service_task(store)).unwrap();
+    spawner.spawn(rgb_task(rgb)).unwrap();
     spawner.spawn(health_task()).unwrap();
     log!("init done");
     console::go_async();
