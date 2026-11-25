@@ -72,7 +72,7 @@ export const calibrationTab: TabDef = {
       label: name,
       sub: `${cal.top[i]}/${cal.bottom[i]}`,
       state: span < switchType(cal.switchType[i]).calibSpan ? "warn" : null,
-      title: `${name}: rest ${cal.top[i]}, bottom ${cal.bottom[i]} (span ${span}), ${switchType(cal.switchType[i]).name}`,
+      title: `${name}: rest ${cal.top[i]}, bottom ${cal.bottom[i]} (span ${span}), ${switchType(cal.switchType[i], app.customSwitches).name}`,
     };
   },
   render(app) {

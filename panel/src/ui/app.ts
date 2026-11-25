@@ -4,7 +4,7 @@
  */
 import { CalibrationFlow } from "../protocol/calibration";
 import {
-  cloneConfig, type Calibration, type DeviceInfo, type KeyboardProtocol, type LiveSample, type ProfileConfig,
+  cloneConfig, type Calibration, type CustomSwitch, type DeviceInfo, type KeyboardProtocol, type LiveSample, type ProfileConfig,
 } from "../protocol/keyboard";
 import type { Transport } from "../protocol/transport";
 import { ZentStockProtocol } from "../protocol/zent/protocol";
@@ -27,6 +27,8 @@ export class App {
   backend = "";
   config: ProfileConfig | null = null;
   calibration: Calibration | null = null;
+  /** board-global custom switch records 0..3 */
+  customSwitches: CustomSwitch[] | null = null;
   profileNames: string[] = [];
   activeProfile = 0;
   /** RAM differs from flash (edits not saved yet) */
@@ -103,6 +105,7 @@ export class App {
     this.info = null;
     this.config = null;
     this.calibration = null;
+    this.customSwitches = null;
     this.dirty = false;
     this.selection.clear();
     this.stopLive = null;
@@ -132,6 +135,7 @@ export class App {
     this.profileNames = await kb.readProfileNames();
     this.config = await kb.readConfig();
     this.calibration = await kb.readCalibration();
+    this.customSwitches = await kb.readCustomSwitches();
     this.dirty = false;
   }
 
@@ -183,6 +187,22 @@ export class App {
       const written = await this.kb!.writeCalibration(next);
       this.calibration = next;
       if (written > 0) this.dirty = true;
+    });
+  }
+
+  /** Custom switch records live in bank 1: the firmware saves them to flash on every write. */
+  editCustomSwitches(label: string, mutate: (draft: CustomSwitch[]) => void): Promise<unknown> {
+    if (!this.kb || !this.customSwitches) return Promise.resolve();
+    const next = cloneConfig(this.customSwitches);
+    mutate(next);
+    return this.run(label, async () => {
+      try {
+        await this.kb!.writeCustomSwitches(next);
+        this.customSwitches = next;
+      } catch (e) {
+        this.customSwitches = await this.kb!.readCustomSwitches().catch(() => this.customSwitches);
+        throw e;
+      }
     });
   }
 

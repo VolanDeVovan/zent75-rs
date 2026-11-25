@@ -21,11 +21,13 @@ function ensureStream(app: App): void {
     const cal = app.calibration;
     const raw = !!app.ui.liveRaw;
     for (let k = 0; k < s.raw.length; k++) {
-      const full = switchType(cal?.switchType[k] ?? 0).travelUm;
+      const full = switchType(cal?.switchType[k] ?? 0, app.customSwitches).travelUm;
       const um = s.travelUm ? s.travelUm[k] : 0;
       if (um > peaks[k]) peaks[k] = um;
       let fill = um / full;
       if (!s.travelUm && cal) fill = (cal.top[k] - s.raw[k]) / Math.max(1, cal.top[k] - cal.bottom[k]);
+      // approximation from travel alone (the RT state is not streamed); normal and mode 2
+      // (RT below the actuation point) both first press at the actuation point
       const actuated = cfg.keyMode[k] === KEY_MODE_RAPID_TRIGGER ? um > cfg.topDeadzoneUm[k] + cfg.rtPressUm[k] : um >= cfg.actuationUm[k];
       view.setFill(k, fill, raw || !s.travelUm ? String(Math.round(s.raw[k])) : um > 0 ? mm(um) : "", actuated ? "ok" : null);
     }

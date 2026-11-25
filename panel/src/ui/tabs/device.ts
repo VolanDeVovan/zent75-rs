@@ -50,7 +50,7 @@ async function doImport(app: App, text: string, name: string): Promise<void> {
         ? toggle(`Restore all ${file.profiles.length} profiles into their slots`, false, (v) => (opts.all = v), "switches profiles and saves each one to flash; otherwise only the file's active profile goes into the current profile")
         : null,
       toggle("Restore profile names", true, (v) => (opts.names = v)),
-      file.calibration ? toggle("Restore calibration and switch types", false, (v) => (opts.calibration = v), "only sensible for the same physical keyboard") : null,
+      file.calibration || file.customSwitches ? toggle("Restore calibration, switch types and custom switch curves", false, (v) => (opts.calibration = v), "only sensible for the same physical keyboard") : null,
       toggle("Save to flash afterwards", false, (v) => (opts.save = v)),
       h("p", { class: "help" }, "The current configuration in RAM is overwritten."),
     ),
@@ -66,6 +66,7 @@ async function doImport(app: App, text: string, name: string): Promise<void> {
     app.profileNames = await app.kb!.readProfileNames();
     app.config = await app.kb!.readConfig();
     app.calibration = await app.kb!.readCalibration();
+    app.customSwitches = await app.kb!.readCustomSwitches();
     app.dirty = !res.saved && res.bytesWritten > 0;
     for (const n of res.notes) app.toast("info", n);
     app.toast("ok", `Imported: ${res.bytesWritten} bytes changed${res.saved ? ", saved to flash" : ", not saved yet"}.`);
@@ -145,14 +146,14 @@ export const deviceTab: TabDef = {
           }), undefined, busy),
         ),
         section("Backup",
-          h("label", { class: "toggle" }, exportCal, h("span", null, "Include calibration and switch types")),
+          h("label", { class: "toggle" }, exportCal, h("span", null, "Include calibration, switch types and custom switch curves")),
           h("div", { class: "row" },
             h("button", { class: "btn", disabled: busy, onclick: () => doExport(app, false, exportCal.checked) }, "Export this profile"),
             h("button", { class: "btn", disabled: busy, onclick: () => doExport(app, true, exportCal.checked) }, "Export all 4 profiles"),
             h("button", { class: "btn", disabled: busy, onclick: () => file.click() }, "Import JSON…"),
             file,
           ),
-          h("p", { class: "help" }, "The JSON holds the full configuration: both layers, actuation, rapid trigger, SOCD, key groups / DKS, lighting and settings."),
+          h("p", { class: "help" }, "The JSON holds the full configuration: both layers, tap-hold and modifier masks, actuation, rapid trigger, SOCD, key groups / DKS, lighting and settings."),
         ),
       ),
       h("div", { class: "col narrow" },
