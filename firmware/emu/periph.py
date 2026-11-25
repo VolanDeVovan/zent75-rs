@@ -106,6 +106,7 @@ class Plic(RegFile):
         super().__init__(m, "PLIC", base, 0x400000)
         self.pending: set[int] = set()
         self.in_service: list[int] = []
+        self.level: dict[int, object] = {}  # source -> callable "still asserted?"
         self.claimed_log = collections.Counter()
 
     def prio(self, n):
@@ -150,6 +151,9 @@ class Plic(RegFile):
         if off == self.CLAIM:
             if value in self.in_service:
                 self.in_service.remove(value)
+            # a level source that is still asserted when its handler completes interrupts again
+            if value in self.level and self.level[value]():
+                self.pending.add(value)
             self.m.irq_changed()
             return
         if self.PENDING <= off < self.PENDING + 0x80:
@@ -201,23 +205,44 @@ class Mchtmr(Periph):
 
 
 class Usb(RegFile):
-    """ChipIdea USB device controller: enough for init not to hang; never sees a host.
-    USBSTS, ENDPTSETUPSTAT and ENDPTCOMPLETE are write-1-to-clear.
+    """ChipIdea USB device controller. Without a host model (`usbhost.py`, `--usb-host`) it is
+    just enough for init not to hang; with one, endpoints can be primed, flushed and completed
+    and the interrupt line follows `USBSTS & USBINTR`.
+    USBSTS, ENDPTSETUPSTAT and ENDPTCOMPLETE are write-1-to-clear; ENDPTPRIME and ENDPTFLUSH
+    are write-1-to-set and finish at once (prime sets ENDPTSTAT, flush clears it).
 
     VBUS: the board has no VBUS sense pin; firmware forces VBUS/session valid in PHY_CTRL0.
     OTGSC.ASV/AVV only follow that override after a delay (on hardware ASV still read 0 at
     hpm-hal's first `poll`, measured on the board) — modelled as `VBUS_SETTLE_MS`.
     `m.usb_run_at` records the first USBCMD.RS = 1 (the device attached to the bus)."""
-    USBCMD, USBSTS, ENDPTPRIME, ENDPTFLUSH, PORTSC1 = 0x140, 0x144, 0x1B0, 0x1B4, 0x184
-    OTGSC, PHY_CTRL0 = 0x1A4, 0x210
+    USBCMD, USBSTS, USBINTR, DEVICEADDR, ENDPTLISTADDR = 0x140, 0x144, 0x148, 0x154, 0x158
+    PORTSC1, OTGSC, ENDPTSETUPSTAT = 0x184, 0x1A4, 0x1AC
+    ENDPTPRIME, ENDPTFLUSH, ENDPTSTAT, ENDPTCOMPLETE, ENDPTCTRL = 0x1B0, 0x1B4, 0x1B8, 0x1BC, 0x1C0
+    PHY_CTRL0 = 0x210
     W1C = (0x144, 0x1AC, 0x1BC)
+    STS_UI, STS_PCI, STS_URI, STS_SLI = 1 << 0, 1 << 2, 1 << 6, 1 << 8
+    IRQ = 51
     OTGSC_AVV_ASV = (1 << 9) | (1 << 10)
+    OTGSC_STATUS, OTGSC_ASVIS = 0x7F << 16, 1 << 18
     PHY_SESS_OVERRIDE = (1 << 13) | (1 << 1)  # sess_valid_override + its enable
     VBUS_SETTLE_MS = 150
 
     def write(self, off, size, value):
         if off in self.W1C:
             self.regs[off] = self.regs.get(off, 0) & ~value & M32
+            self.update_irq()
+            return
+        if off == self.ENDPTPRIME:
+            self.regs[self.ENDPTSTAT] = (self.regs.get(self.ENDPTSTAT, 0) | value) & M32
+            return
+        if off == self.ENDPTFLUSH:
+            self.regs[self.ENDPTSTAT] = self.regs.get(self.ENDPTSTAT, 0) & ~value & M32
+            return
+        if off == self.OTGSC:
+            # status-change bits 16..22 are write-1-to-clear, the rest is control / enables
+            keep = self.regs.get(off, 0) & self.OTGSC_STATUS & ~value
+            self.regs[off] = (value & ~self.OTGSC_STATUS | keep) & M32
+            self.update_irq()
             return
         if off == self.PHY_CTRL0:
             if value & self.PHY_SESS_OVERRIDE == self.PHY_SESS_OVERRIDE:
@@ -227,7 +252,32 @@ class Usb(RegFile):
                 self.vbus_since = None
         if off == self.USBCMD and value & 1 and getattr(self.m, "usb_run_at", None) is None:
             self.m.usb_run_at = self.m.cycles
+        if off == self.USBCMD and value & 2:  # controller reset
+            for r in (self.USBSTS, self.USBINTR, self.ENDPTSETUPSTAT, self.ENDPTSTAT, self.ENDPTCOMPLETE):
+                self.regs[r] = 0
         super().write(off, size, value)
+        if off == self.USBINTR:
+            self.update_irq()
+
+    def set_status(self, bits: int) -> None:
+        """A host-side event: set USBSTS bits and raise the interrupt if enabled."""
+        self.regs[self.USBSTS] = self.regs.get(self.USBSTS, 0) | bits
+        self.update_irq()
+
+    def session_change(self) -> None:
+        """A-session-valid changed (a VBUS glitch): OTGSC.ASVIS, an interrupt if ASVIE is set."""
+        self.regs[self.OTGSC] = self.regs.get(self.OTGSC, 0) | self.OTGSC_ASVIS
+        self.update_irq()
+
+    def irq_asserted(self) -> bool:
+        otgsc = self.regs.get(self.OTGSC, 0)
+        return bool(self.regs.get(self.USBSTS, 0) & self.regs.get(self.USBINTR, 0)
+                    or (otgsc & self.OTGSC_STATUS) >> 16 & otgsc >> 24)
+
+    def update_irq(self) -> None:
+        self.m.plic.level[self.IRQ] = self.irq_asserted
+        if self.irq_asserted():
+            self.m.plic.raise_irq(self.IRQ)
 
     def get(self, off):
         v = super().get(off)

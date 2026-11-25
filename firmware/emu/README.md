@@ -27,6 +27,7 @@ which takes the whole erase / program / verify path through the flash gate).
 | `--enter-bootloader MS` | at MS force a call to the firmware's `enter_bootloader` and require a clean jump to `0x80020000` |
 | `--press ADC0:1:3:100-200:0xC000` | ADC input override (adc, channel, mux step 0..10, time span, value); the HID state must change during the press |
 | `--press SLOT:9:100-200:0xB96C` | same, by scan slot (`step × 8 + position`, interleave of `firmware/app/src/scan.rs`) |
+| `--usb-host enumerate\|reboot\|vbus-glitch` | attach the scripted USB host (`usbhost.py`): enumerate and use the vendor interface; `reboot` adds what hosts do around a reboot (control transfers abandoned for a new SETUP, bus resets in the middle of a transfer, a reset while a reply waits unpolled, suspend, deconfigure, a session-valid glitch), each followed by a full enumeration and a vendor round trip; `vbus-glitch` holds on for longer than the watchdog after the glitch. Needs about `--ms 1100` / `--ms 2700` |
 | `--scan-budget N` | max average cycles per scan (default 60000 = 125 µs at 480 MHz) |
 | `--adc-rest V` | ADC result of an idle input (default `0x8000`) |
 | `--adc-noise N` | ± N counts of deterministic pseudo-random noise on every conversion (default 0; real sensors move the filtered value every scan) |
@@ -55,6 +56,7 @@ ELF when built; the module is skipped when unicorn is not installed).
 | scan budget | the firmware's own `scan::STATS` (mcycle around `Keyboard::scan`) average > `--scan-budget`; scans, drops, cycles/scan and ADC-ISR cost are reported; bad channels, trigger conflicts, missing or late mux steps are warnings |
 | HID | with `--press`: `scan::LAST_GEN` (written when `Keyboard::hid_generation` moves) is not written while a press is held (+20 ms) |
 | USB attach | `USBCMD.RS` not set within 1.5 s, or cleared again by the end of the run. `OTGSC.ASV/AVV` follow the PHY VBUS override only after a delay, as on the board: a driver that trusts ASV for power events detaches |
+| USB host | with `--usb-host`: the device does not answer a request, a descriptor or a vendor frame within 50 ms, or the scenario does not finish in the run |
 | UART | `--banner` given and not seen |
 | pin mux | IOC/PIOC `FUNC_CTL` of a board pad written with a different function than the table below; with `--strict-pinmux` also pads never written |
 | loader jump | with `--enter-bootloader`/`--expect-bootloader`: no jump to `0x80020000`, or L1 caches still on, or a watchdog still running (MIE / PLIC enables / USB run bit left on are warnings) |
@@ -105,8 +107,9 @@ GPIO level changes and peripheral activity (ADC sequences, PWM periods, timer re
   program = AND), OTP `read_from_shadow` returns a fixed fake UID.
 - **Peripheral models** (`periph.py`, `scan.py`): UART0 (TX capture, LSR always empty), PLIC,
   MCHTMR, SYSCTL/PLLCTL (register files; every field named `*busy*` in metapac reads 0, so clock
-  switches finish at once), USB0 (`usbcmd.rst` self-clears, prime/flush read 0 — it never sees a
-  host), GPIO0/FGPIO/PGPIO (DO/OE set/clear/toggle, level changes logged), IOC/PIOC, PPOR
+  switches finish at once), USB0 (`usbcmd.rst` self-clears, prime/flush finish at once and
+  drive ENDPTSTAT, USBSTS/OTGSC status bits are write-1-to-clear and drive a level interrupt; a
+  host only with `--usb-host`), GPIO0/FGPIO/PGPIO (DO/OE set/clear/toggle, level changes logged), IOC/PIOC, PPOR
   (`reset_flag` W1C, software reset ends the run), EWDG0/1, HDMA, XPI0 (write = failure), ADC0/1
   (sequence mode + sequence DMA + `seq_cvc` IRQ 58/59), PWM0 (ADC hardware trigger at the even
   compare points while `cen`), PWM1, GPTMR0/1 (reload IRQ 5/6). Every other address inside a
@@ -132,8 +135,13 @@ for interrupts, `self.m.fail/warn/event` for findings, `self.m.time_poll()` in t
   stack-protection CSRs are plain storage.
 - Every misaligned RAM access is a failure, although the core may support some.
 - `mcycle` virtualisation needs the ELF (scanned code); with a UF2 input QEMU returns host ticks.
-- USB: registers only, no enumeration, no USB interrupts; HID/vendor protocol cannot be tested
-  here (use `firmware/sim`).
+- USB: without `--usb-host` registers only (no host, no USB interrupts). The scripted host
+  works on the controller's queue heads and transfer descriptors and raises the USB interrupt,
+  but it knows no packet timing, data toggles, stalls or speeds, and three points of controller
+  behaviour are assumptions, not measurements (listed at the top of `usbhost.py`): ep0 tokens
+  are not answered while ENDPTSETUPSTAT is set, primed stages survive a SETUP and a bus reset
+  until the driver flushes them, and a session-valid change raises OTGSC.ASVIS on its own.
+  The key pipeline over HID is tested in `firmware/sim`.
 - ADC: TRGM routing, conversion timing and the seq-DMA word layout (SDK, unverified) are
   approximations (conversion time from `conv_cfg1`); values come from `SensorSource`, not from a
   hall model; PWM CNT runs from virtual time; PWM1 (mux address) is a register file — the mux

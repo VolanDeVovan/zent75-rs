@@ -377,3 +377,13 @@ def test_pwm_counter_runs_from_virtual_time():
     res = run_words(code + IDLE)
     a, b = struct.unpack("<2I", res.m.uc.mem_read(0x00090000, 8))
     assert b > a and (b - a) >> 4 < 20000
+
+
+@needs_elf
+def test_real_firmware_survives_the_usb_host_reboot_scenario():
+    """Aborted control transfers, resets mid-transfer, suspend, re-enumeration, a VBUS glitch:
+    after each the device must enumerate and answer on the vendor interface (emu/usbhost.py)."""
+    res = gate(DEFAULT_ELF, ms=520, usb_host="reboot", show_mmio=False)
+    assert res.ok, res.text
+    assert res.m.usb_host.done, res.text
+

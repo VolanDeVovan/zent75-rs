@@ -22,6 +22,7 @@ if HERE not in sys.path:
 from image import Image, config_banks_from_backup  # noqa: E402
 from machine import CPU_HZ, FAIL, INFO, WARN, Machine  # noqa: E402
 import pinmux  # noqa: E402
+import usbhost  # noqa: E402
 from regnames import RegNames  # noqa: E402
 
 DEFAULT_ELF = os.path.join(os.path.dirname(HERE), "app", "target", "riscv32imafc-unknown-none-elf",
@@ -56,7 +57,8 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
          enter_bootloader_ms: float | None = None, show_mmio: bool = True,
          reset_flags: int = 0, expect_bootloader: bool = False, preload=None,
          adc_rest: int | None = None, adc_noise: int = 0, div_cycles: int = 1,
-         profile_from_ms: float | None = None, presses=(), scan_budget: int = SCAN_BUDGET) -> Result:
+         profile_from_ms: float | None = None, presses=(), scan_budget: int = SCAN_BUDGET,
+         usb_host: str | None = None) -> Result:
     """Run the gate on an ELF/UF2 path (or an `Image`) and return the `Result`."""
     img = path if isinstance(path, Image) else Image.load(path)
     names = RegNames()
@@ -76,6 +78,10 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
     for spec in presses:
         m.sensor.press(*parse_press(spec))
     m.hid_watch = m.watch_writes(HID_GEN_SYMBOL)
+    m.usb_host = None
+    if usb_host:
+        m.usb_host = usbhost.UsbHost(m)
+        m.usb_host.start(usbhost.SCENARIOS[usb_host])
     m.scan_budget = scan_budget
     m.presses = list(presses)
     reason = "not-started"
@@ -215,6 +221,11 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
     if usb is not None and usb_run_at is not None and reason != "bootloader" and not usb.get(usb.USBCMD) & 1:
         m.note(FAIL, "usb", "USB0 detached again by the end of the run (USBCMD.RS = 0)")
 
+    host = getattr(m, "usb_host", None)
+    if host is not None and reason != "not-started" and not host.done and host.failed is None:
+        m.note(FAIL, "usb-host", "the USB host scenario did not finish within the run "
+               f"(last step: {host.log[-1].strip() if host.log else 'none'}); give it more --ms")
+
     want_jump = hook_target is not None or expect_bootloader
     if want_jump and m.bootloader_jump is None:
         what = (f"{hook_target[1]} forced at {enter_bootloader_ms} ms" if hook_target
@@ -338,6 +349,13 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
         for a in act:
             p(f"  {a}")
 
+    host = getattr(m, "usb_host", None)
+    if host is not None:
+        p("")
+        p("== USB host scenario")
+        for line in host.log:
+            p("  " + line)
+
     if stats is not None:
         p("")
         p("== scan statistics (firmware STATS)")
@@ -402,6 +420,9 @@ def main(argv=None) -> int:
                          "or SLOT:n:T0-T1:VALUE (slot = step*8 + position); the HID state must change")
     ap.add_argument("--scan-budget", type=int, default=SCAN_BUDGET,
                     help=f"max average cycles per scan (default {SCAN_BUDGET})")
+    ap.add_argument("--usb-host", choices=sorted(usbhost.SCENARIOS),
+                    help="attach a scripted USB host (usbhost.py): 'enumerate', or 'reboot' = aborted "
+                         "control transfers, resets mid-transfer, suspend, re-enumeration")
     ap.add_argument("--no-mmio", action="store_true", help="omit the MMIO write list")
     ap.add_argument("-v", "--verbose", action="store_true", help="print events and UART live")
     a = ap.parse_args(argv)
@@ -417,7 +438,8 @@ def main(argv=None) -> int:
                    enter_bootloader_ms=a.enter_bootloader, show_mmio=not a.no_mmio,
                    reset_flags=a.reset_flags, expect_bootloader=a.expect_bootloader,
                    adc_rest=a.adc_rest, adc_noise=a.adc_noise, div_cycles=a.div_cycles,
-                   profile_from_ms=a.profile_from, presses=a.press, scan_budget=a.scan_budget)
+                   profile_from_ms=a.profile_from, presses=a.press, scan_budget=a.scan_budget,
+                   usb_host=a.usb_host)
     except (OSError, ValueError) as e:
         print(f"cannot load {a.image}: {e}", file=sys.stderr)
         return 2
