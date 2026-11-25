@@ -71,8 +71,9 @@ pub fn report_previous() {
 
 // ------------------------------------------------------------------ stall detector
 
-/// Scans between two checks (250 ms at 8 kHz).
-const CHECK_EVERY_SCANS: u32 = 2000;
+/// CPU cycles between two checks: 250 ms at the 480 MHz of `main::clock_config` (measured in
+/// cycles, not frames, so a broken scan cannot speed the detector up).
+const CHECK_EVERY_CYCLES: u32 = 120_000_000;
 /// Checks without a heartbeat before the stall is recorded: 1.25–1.5 s after the last one,
 /// ahead of the 2 s watchdog.
 const STALLED_CHECKS: u32 = 5;
@@ -80,30 +81,51 @@ const _: () = assert!((STALLED_CHECKS as u64 + 1) * 250 < crate::system::WATCHDO
 
 /// Bumped with every watchdog feed ([`heartbeat`]).
 static BEAT: AtomicU32 = AtomicU32::new(0);
+/// Where the scan-processing interrupt last interrupted thread mode ([`note_thread_pc`]).
+static THREAD_PC: AtomicU32 = AtomicU32::new(0);
 
 /// Thread mode is alive. Called by `system::watchdog_feed`.
 pub fn heartbeat() {
     BEAT.fetch_add(1, Relaxed);
 }
 
-/// Run from the scan-processing interrupt after every scan: when the watchdog has not been fed
-/// for [`STALLED_CHECKS`] checks, record the `pc` thread mode is stuck at. The watchdog reset
-/// follows, the boot after it goes to the UF2 loader, and the next start of this firmware logs
-/// the record.
-pub fn stall_check(scans: u32, pc: u32) {
+/// Called by the scan-processing interrupt with the pc it interrupted.
+#[inline(always)]
+pub fn note_thread_pc(pc: u32) {
+    THREAD_PC.store(pc, Relaxed);
+}
+
+/// Run from the ADC capture interrupt once per frame — the highest priority there is, so it
+/// keeps running whatever hangs below it. When the watchdog has not been fed for
+/// [`STALLED_CHECKS`] checks, record where the firmware is stuck: the pc last seen below the
+/// scan-processing interrupt (thread mode spinning), the pc below this interrupt (`pc`: an
+/// interrupt handler that keeps firing), and whether scans still ran. The watchdog reset
+/// follows; the next start of the app logs the record.
+pub fn stall_check(pc: u32, scans: u32) {
     static LAST_CHECK: AtomicU32 = AtomicU32::new(0);
     static LAST_BEAT: AtomicU32 = AtomicU32::new(u32::MAX);
+    static LAST_SCANS: AtomicU32 = AtomicU32::new(0);
     static MISSED: AtomicU32 = AtomicU32::new(0);
-    // not `scans % N == 0`: one call can follow two scans
-    if scans.wrapping_sub(LAST_CHECK.load(Relaxed)) < CHECK_EVERY_SCANS {
+    let now = riscv::register::mcycle::read() as u32;
+    if now.wrapping_sub(LAST_CHECK.load(Relaxed)) < CHECK_EVERY_CYCLES {
         return;
     }
-    LAST_CHECK.store(scans, Relaxed);
+    // only this (never nested) interrupt writes these, so load + store is enough
+    LAST_CHECK.store(now, Relaxed);
+    let scanned = scans.wrapping_sub(LAST_SCANS.swap(scans, Relaxed));
     let beat = BEAT.load(Relaxed);
     if beat != LAST_BEAT.swap(beat, Relaxed) {
         MISSED.store(0, Relaxed);
-    } else if MISSED.fetch_add(1, Relaxed) + 1 == STALLED_CHECKS {
-        record(format_args!("thread mode stalled at pc {:#010x}", pc));
-        crate::log!("thread mode stalled at pc {:#010x}", pc);
+        return;
+    }
+    let missed = MISSED.load(Relaxed) + 1;
+    MISSED.store(missed, Relaxed);
+    if missed == STALLED_CHECKS {
+        let thread_pc = THREAD_PC.load(Relaxed);
+        record(format_args!(
+            "watchdog not fed for {} ms: thread mode at pc {:#010x}, pc below the ADC interrupt {:#010x}, {} scans in the last 250 ms",
+            250 * STALLED_CHECKS, thread_pc, pc, scanned
+        ));
+        crate::log!("stall: thread pc {:#010x}, below ADC {:#010x}, {} scans / 250 ms", thread_pc, pc, scanned);
     }
 }

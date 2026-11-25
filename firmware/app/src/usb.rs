@@ -19,7 +19,7 @@
 //! selected (stock always answers 0), and in boot protocol the keyboard sends the 8-byte boot
 //! report (stock keeps sending NKRO, which BIOSes cannot parse).
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -75,6 +75,8 @@ fn hid_descriptor(bcd: u16, report_len: usize) -> [u8; 7] {
 static BOOT_PROTOCOL: AtomicBool = AtomicBool::new(false);
 static REMOTE_WAKEUP: AtomicBool = AtomicBool::new(false);
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
+/// Counts SET_CONFIGURATION: tells the endpoint tasks that the host starts from scratch.
+static CONFIGURATIONS: AtomicU32 = AtomicU32::new(0);
 static IDLE: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
 
 struct HidHandler {
@@ -103,7 +105,9 @@ const SET_PROTOCOL: u8 = 0x0B;
 impl Handler for HidHandler {
     fn reset(&mut self) {
         BOOT_PROTOCOL.store(false, Ordering::Relaxed);
+        REMOTE_WAKEUP.store(false, Ordering::Relaxed);
         CONFIGURED.store(false, Ordering::Relaxed);
+        log!("usb: bus reset");
     }
 
     fn configured(&mut self, configured: bool) {
@@ -119,7 +123,9 @@ impl Handler for HidHandler {
             log!("usb: deconfigured");
         }
         if configured {
-            // Resend current state on (re)configuration.
+            // A new host (firmware, boot loader, OS) knows nothing of what the last one was
+            // sent: every endpoint task sends its current report again.
+            CONFIGURATIONS.fetch_add(1, Ordering::Relaxed);
             scan::signal_hid();
         }
     }
@@ -228,13 +234,20 @@ impl Report {
 }
 
 /// Send `current()` on `ep` whenever `signal` fires and the report differs from the one the
-/// host last got (stock sends on change only).
+/// host last got (stock sends on change only). After a (re)configuration the host has got
+/// nothing yet, so e.g. a key held through the firmware → OS hand-over is reported again.
 async fn send_on_change(mut ep: EpIn, signal: &HidSignal, current: impl Fn(&HidReports) -> Report) -> ! {
     let mut sent = None;
+    let mut configuration = 0;
     loop {
         ep.wait_enabled().await;
         signal.wait().await;
         loop {
+            let now = CONFIGURATIONS.load(Ordering::Relaxed);
+            if now != configuration {
+                configuration = now;
+                sent = None;
+            }
             let r = kb::with(|kb| current(kb.hid()));
             if sent == Some(r) {
                 break;

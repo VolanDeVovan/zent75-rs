@@ -190,10 +190,12 @@ async fn main(spawner: Spawner) -> ! {
     console::init();
     log!("");
     log!("ZENT75-HE zent75-rs {} (protocol version {:?})", env!("CARGO_PKG_VERSION"), zent_core::device::VERSION);
-    debug::crash::report_previous();
     let clk = hal::sysctl::clocks();
     log!("cpu {} Hz, ahb {} Hz", clk.cpu0.0, clk.ahb.0);
     system::check_reset_cause(); // may divert to the UF2 loader after a watchdog reset
+    // Only now: a boot that goes to the loader leaves the record for the next start of the app
+    // (it survives as long as the board stays powered).
+    debug::crash::report_previous();
     system::watchdog_start(p.EWDG0);
     plic::setup();
     spawner.spawn(console_task()).unwrap();

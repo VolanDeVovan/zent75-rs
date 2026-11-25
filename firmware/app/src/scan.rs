@@ -354,13 +354,17 @@ fn stat_min(a: &AtomicU32, v: u32) {
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::ADC0)]
 fn ADC0() {
     let c0 = cycles();
-    capture_step();
+    if capture_step() {
+        // once per frame, from the one context nothing can starve
+        debug::crash::stall_check(riscv::register::mepc::read() as u32, STATS.scans.load(Relaxed));
+    }
     stat_max(&STATS.adc_cyc_max, cycles().wrapping_sub(c0));
     interrupt::ADC0.complete();
 }
 
+/// Returns true after the last mux step of a frame.
 #[inline(always)]
-fn capture_step() {
+fn capture_step() -> bool {
     let cnt = pac::PWM0.cnt().read().cnt();
     let s0 = pac::ADC0.int_sts().read().0;
     pac::ADC0.int_sts().write(|w| w.0 = s0);
@@ -413,22 +417,23 @@ fn capture_step() {
         // Publish only plausible frames: if step decoding ever breaks (e.g. the PWM0 counter
         // reads a constant) we must not run Keyboard::scan once per *step* and starve the
         // executor; the scan then stops visibly (console `scan 0/s`, `miss` counting up).
-        if seen < STEP_COUNT as u32 - 1 {
-            return;
+        if seen >= STEP_COUNT as u32 - 1 {
+            READY_IDX.store(w, Relaxed);
+            READY_SEQ.fetch_add(1, Relaxed);
+            WRITE_IDX.store(w ^ 1, Relaxed);
+            kick_processing();
         }
-        READY_IDX.store(w, Relaxed);
-        READY_SEQ.fetch_add(1, Relaxed);
-        WRITE_IDX.store(w ^ 1, Relaxed);
-        kick_processing();
+        return true;
     }
+    false
 }
 
 /// Deferred frame processing (stock's GPTMR1 trick). Preemptible by ADC0 and USB0.
 #[allow(non_snake_case)]
 #[hpm_hal::external_interrupt(hpm_hal::pac::interrupt::GPTMR1)]
 fn GPTMR1() {
-    // Where thread mode (or a lower context) was interrupted: the stall detector reports it.
-    let interrupted_pc = riscv::register::mepc::read() as u32;
+    // Where thread mode was interrupted: the stall detector reports it.
+    debug::crash::note_thread_pc(riscv::register::mepc::read() as u32);
     let t = pac::GPTMR1;
     t.channel(0).cr().write(|w| w.0 = 0x208); // stop
     t.sr().write(|w| w.0 = 1);
@@ -444,7 +449,6 @@ fn GPTMR1() {
         unsafe { riscv::interrupt::enable() };
         process_frames();
         riscv::interrupt::disable();
-        debug::crash::stall_check(STATS.scans.load(Relaxed), interrupted_pc);
         IN_PROCESS.store(false, Relaxed);
     }
     interrupt::GPTMR1.complete();
