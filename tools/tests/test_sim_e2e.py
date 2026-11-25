@@ -189,7 +189,8 @@ def test_stream_and_key_press(sim, sim_env):
         assert len(frames) >= 5, "no BE FD stream after heartbeat"
         assert all(_stream_ok(f) for f in frames)
         f = zl.decode_stream(frames[-1])
-        assert f.travel[KEY_A] == 0 and 25000 < f.raw[KEY_A] < 35000
+        # the stock filter lets a few µm of sim noise through at rest; actuation is ~1000+ µm
+        assert f.travel[KEY_A] < 100 and 25000 < f.raw[KEY_A] < 35000
 
         sim.cmd("press A")
         seen = 0
@@ -198,7 +199,7 @@ def test_stream_and_key_press(sim, sim_env):
             z.heartbeat()
             r = z.recv(0.2)
             f = zl.decode_stream(r) if r else None
-            if f and f.travel[KEY_A] > 0:
+            if f and f.travel[KEY_A] > 500:
                 seen = f.travel[KEY_A]
         assert seen > 0, "pressed key never showed travel in the stream"
         # key_map[A] was set to 5 (HID usage B) by the previous test
