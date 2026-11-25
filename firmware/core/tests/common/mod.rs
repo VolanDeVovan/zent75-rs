@@ -114,6 +114,8 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
     let mut k = KeyProcessor::new();
     e.set_compat(compat);
     k.set_compat(compat);
+    // the replays run on precomputed height tables (engine_fixed / device tests interpolate)
+    e.set_height_tables(height_tables(4));
     e.configure(&fx.g, &fx.p);
     k.invalidate();
     e.init_samples(&[fx.rest as u16; SLOT_COUNT]); // the harness powers up at rest
@@ -200,3 +202,8 @@ pub fn replay_with(name: &str, compat: Compat, mut obs: impl FnMut(usize, &Engin
     (bad, ours_all, stock_all)
 }
 
+
+/// Leaked storage for `n` height tables (as the firmware hands static RAM to the engine).
+pub fn height_tables(n: usize) -> &'static mut [zent_core::engine::curves::HeightTable] {
+    Box::leak(vec![[0i16; zent_core::engine::curves::HEIGHT_TABLE_LEN]; n].into_boxed_slice())
+}

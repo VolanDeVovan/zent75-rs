@@ -15,13 +15,15 @@
 
 pub mod compat;
 pub mod curves;
+pub mod recip;
 pub mod tables;
 
 use crate::config::{Global, Profile};
 use crate::layout::{KEY_COUNT, SLOT_COUNT, STEP_COUNT};
 use crate::protocol::{Reply, REPORT_SIZE};
 use compat::{Compat, HELD_RECOVER_COUNTS};
-use curves::{type_of_code, Curves, TYPES};
+use curves::{type_of_code, Curves, HeightTable, TYPES};
+use recip::Recip;
 use tables::{iir_step, DZ, NEIGHBOURS, OBJ_TO_SLOT, SLOT_TO_OBJ, XT_C1, XT_C2, XT_C3};
 
 /// Scans before the engine starts (1.5 s).
@@ -50,12 +52,6 @@ const XT_SRC: [[u8; 3]; N] = {
     t
 };
 const IIR_ACC_LIMIT: i32 = 0x70000;
-
-/// RISC-V `div`: truncating, `x/0 = −1`, `MIN/−1 = MIN`.
-#[inline]
-pub(crate) fn div_rv(a: i32, b: i32) -> i32 {
-    if b == 0 { -1 } else { a.wrapping_div(b) }
-}
 
 /// Stock span (`FUN_A6F8` / auto-cal), single precision:
 /// `(int)(−((float)a − (float)b + (float)(2·dz)) · 65536 / 2636)`.
@@ -110,7 +106,8 @@ pub struct Engine {
     wn: [u16; N],
     // ---- normalisation
     dz: [i16; N],
-    span: [i32; N],
+    /// Normalisation span (stock `FUN_A6F8`), kept as a reciprocal: the three heights divide by it every scan.
+    span: [Recip; N],
     bot_eff: [u16; N],
     stored_top: [u16; N],
     stored_bot: [u16; N],
@@ -193,7 +190,7 @@ impl Engine {
             wsum: [0; N],
             wn: [0; N],
             dz: [0; N],
-            span: [1; N],
+            span: [Recip::new(1); N],
             bot_eff: [0; N],
             stored_top: [0; N],
             stored_bot: [0; N],
@@ -248,6 +245,13 @@ impl Engine {
 
     // ------------------------------------------------------------------ configuration
 
+    /// Storage for precomputed height tables (see [`HeightTable`]); without it the heights are
+    /// interpolated on every lookup. Contents are overwritten.
+    pub fn set_height_tables(&mut self, tables: &'static mut [HeightTable]) {
+        self.curves.set_tables(tables);
+        self.hkey = [i32::MIN; N];
+    }
+
     /// Select fixed (default) or stock behaviour of the vendor quirks.
     pub fn set_compat(&mut self, c: Compat) {
         self.compat = c;
@@ -280,11 +284,12 @@ impl Engine {
                 self.act_ref[s] = self.bot_eff[s] as i32;
                 self.swing[s] = (self.bot_eff[s] as i32 - top as i32).abs();
             }
-            self.span[s] = if self.initialized && !self.compat.autocal_ref_from_boot {
+            let span = if self.initialized && !self.compat.autocal_ref_from_boot {
                 span_of(self.act_ref[s] as f32, top as f32, self.dz[s] as i32)
             } else {
                 span_of(self.bot_eff[s] as f32, top as f32, self.dz[s] as i32)
             };
+            self.set_span(s, span);
         }
         for s in 0..N {
             // activity threshold: stock indexes it with slot2key of the object index
@@ -292,6 +297,10 @@ impl Engine {
             self.act_thr[s] = (self.max_s[OBJ_TO_SLOT[k] as usize] - 100) as i16;
         }
         self.autocal = p.auto_calibration();
+    }
+
+    fn set_span(&mut self, s: usize, span: i32) {
+        self.span[s] = Recip::new(span);
     }
 
     /// Stock `FUN_10E28` engine init with the samples read at power-up (before the scan
@@ -304,7 +313,7 @@ impl Engine {
             self.dz[s] = if x > 0x8000 { -DZ[s] as i16 } else { DZ[s] as i16 };
             self.act_ref[s] = self.bot_eff[s] as i32;
             self.swing[s] = (self.bot_eff[s] as i32 - self.stored_top[s] as i32).abs();
-            self.span[s] = span_of(self.bot_eff[s] as f32, self.stored_top[s] as f32, self.dz[s] as i32);
+            self.set_span(s, span_of(self.bot_eff[s] as f32, self.stored_top[s] as f32, self.dz[s] as i32));
             self.hc[s] = self.max_s[s] as i16;
         }
         self.initialized = true;
@@ -469,24 +478,25 @@ impl Engine {
         }
         for s in r {
             let (b, y, dz, span) = (self.base[s], self.raw_s[s], self.dz[s] as i32, self.span[s]);
-            self.dyb[s] = y.wrapping_sub(b);
-            if self.dyb[s] == self.hkey[s] {
+            let dyb = y.wrapping_sub(b);
+            self.dyb[s] = dyb;
+            if dyb == self.hkey[s] {
                 // same inputs as last time: identical heights (saves 3 divisions + 3 lookups)
                 self.vel[s] = self.hist0[s].wrapping_sub(self.hc[s]);
                 self.hist0[s] = self.hc[s];
                 continue;
             }
-            self.hkey[s] = self.dyb[s];
-            let t = self.typ[s];
-            let fa = div_rv(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000), span);
-            self.ha[s] = self.curves.height(t, fa) as i16;
-            let fb = div_rv(dz.wrapping_sub(self.dyb[s]).wrapping_mul(0x10000), span);
-            self.hb[s] = self.curves.height(t, fb) as i16;
-            let fc = div_rv(self.dyb[s].wrapping_mul(-0x10000), span);
-            let hc = self.curves.height(t, fc);
-            self.vel[s] = self.hist0[s].wrapping_sub(hc as i16);
-            self.hist0[s] = hc as i16;
-            self.hc[s] = hc as i16;
+            self.hkey[s] = dyb;
+            let curve = self.curves.curve(self.typ[s]);
+            let fa = span.div(b.wrapping_sub(y).wrapping_sub(dz).wrapping_mul(0x10000));
+            let fb = span.div(dz.wrapping_sub(dyb).wrapping_mul(0x10000));
+            let fc = span.div(dyb.wrapping_mul(-0x10000));
+            let hc = curve.height(fc) as i16;
+            self.ha[s] = curve.height(fa) as i16;
+            self.hb[s] = curve.height(fb) as i16;
+            self.vel[s] = self.hist0[s].wrapping_sub(hc);
+            self.hist0[s] = hc;
+            self.hc[s] = hc;
         }
     }
 
@@ -705,7 +715,7 @@ impl Engine {
         let new = (base + d) & 0xFFFF;
         self.act_ref[s] += (new - self.act_ref[s]) / 2;
         self.ac_fit[s] = new as u16;
-        self.span[s] = span_of(self.act_ref[s] as f32, base as f32, self.dz[s] as i32);
+        self.set_span(s, span_of(self.act_ref[s] as f32, base as f32, self.dz[s] as i32));
         self.hkey[s] = i32::MIN;
     }
 

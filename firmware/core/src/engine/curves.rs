@@ -19,6 +19,14 @@ const MAX_POINTS: usize = crate::config::CURVE_MAX;
 /// `f` positions per lookup bucket (speeds the segment search up to a few compares).
 const BUCKET_SHIFT: u32 = 5;
 const BUCKETS: usize = (TABLE_LEN >> BUCKET_SHIFT) + 1;
+/// Entries of a [`HeightTable`]: every `f − t0` the bucket index answers (beyond it, 0).
+pub const HEIGHT_TABLE_LEN: usize = BUCKETS << BUCKET_SHIFT;
+/// Precomputed heights of one switch type, indexed by `f − t0`: the per-scan lookup becomes one
+/// load instead of a segment walk and a division. The platform provides the storage
+/// ([`Curves::set_tables`], ~5.3 KB each); types without a table are interpolated on the fly.
+pub type HeightTable = [i16; HEIGHT_TABLE_LEN];
+/// No table for this type.
+const NO_TABLE: u8 = u8::MAX;
 
 pub struct Curves {
     tpl: [[i16; MAX_POINTS]; TYPES],
@@ -33,6 +41,12 @@ pub struct Curves {
     pub f10: [i32; TYPES],
     /// Full travel per type (custom: from the record).
     pub max_travel: [i32; TYPES],
+    /// Table storage handed in by the platform (may be empty).
+    tables: &'static mut [HeightTable],
+    /// Index into `tables` per type, or [`NO_TABLE`].
+    table_of: [u8; TYPES],
+    /// Types in use at the last [`Curves::build`].
+    used: [bool; TYPES],
 }
 
 /// Stock `FUN_16146`: `keytype_code` → switch type 0..7.
@@ -74,6 +88,34 @@ impl Curves {
             t0: [-12, -11, -7, -10, -12, -12, -12, -12],
             f10: [2626, 2625, 2622, 2621, 2626, 2626, 2626, 2626],
             max_travel: [3420, 3375, 3420, 3780, 3420, 3420, 3420, 3420],
+            tables: &mut [],
+            table_of: [NO_TABLE; TYPES],
+            used: [false; TYPES],
+        }
+    }
+
+    /// Hand over storage for precomputed height tables (one per switch type in use, the first
+    /// `tables.len()` of them). The contents are overwritten; takes effect at once.
+    pub fn set_tables(&mut self, tables: &'static mut [HeightTable]) {
+        self.tables = tables;
+        self.fill_tables();
+    }
+
+    /// (Re)compute the tables of the types in use.
+    fn fill_tables(&mut self) {
+        self.table_of = [NO_TABLE; TYPES];
+        let mut k = 0;
+        for t in 0..TYPES {
+            if !self.used[t] || k >= self.tables.len() {
+                continue;
+            }
+            let t0 = self.t0[t];
+            for i in 0..HEIGHT_TABLE_LEN {
+                let h = self.at(t, t0 + i as i32);
+                self.tables[k][i] = h as i16;
+            }
+            self.table_of[t] = k as u8;
+            k += 1;
         }
     }
 
@@ -104,12 +146,16 @@ impl Curves {
             self.max_travel[t] = max;
             self.t0[t] = self.tpl[t][0] as i32;
             self.index(t);
+        }
+        self.used = *used;
+        self.fill_tables();
+        for t in 0..TYPES {
             if !used[t] {
                 continue;
             }
             let (mut sum, mut cnt) = (0i32, 0i32);
             for i in 0..TABLE_LEN as i32 {
-                if (8..=12).contains(&self.at(t, self.t0[t] + i)) {
+                if (8..=12).contains(&self.entry(t, self.t0[t] + i)) {
                     sum += i;
                     cnt += 1;
                 }
@@ -137,16 +183,20 @@ impl Curves {
     /// Height in µm at position `f` (stock `FUN_14D86` on the stock table).
     #[inline]
     pub fn height(&self, t: u8, f: i32) -> i32 {
+        self.curve(t).height(f)
+    }
+
+    /// The lookup of type `t`, for several heights in a row.
+    #[inline(always)]
+    pub fn curve(&self, t: u8) -> Curve<'_> {
         let t = t as usize & 7;
-        let t0 = self.t0[t];
-        let f = if f < t0 {
-            t0
-        } else if f > F_FULL - 1 {
-            F_FULL
-        } else {
-            f
-        };
-        self.at(t, f)
+        Curve { curves: self, t, t0: self.t0[t], table: self.tables.get(self.table_of[t] as usize) }
+    }
+
+    /// Stock table entry at `f` (`t0 ≤ f`), from the precomputed table if type `t` has one.
+    #[inline(always)]
+    fn entry(&self, t: usize, f: i32) -> i32 {
+        self.curve(t as u8).entry(f)
     }
 
     /// Stock table entry at position `f` (`t0 ≤ f < t0 + TABLE_LEN`).
@@ -180,6 +230,37 @@ impl Curves {
             j += 1;
         }
         (((f - f1) * hts[j] as i32 + (f2 - f) * hts[i] as i32) / (f2 - f1)) as i16 as i32
+    }
+}
+
+/// Height lookup of one switch type ([`Curves::curve`]).
+pub struct Curve<'a> {
+    curves: &'a Curves,
+    t: usize,
+    t0: i32,
+    table: Option<&'a HeightTable>,
+}
+
+impl Curve<'_> {
+    /// Height in µm at position `f` (stock `FUN_14D86`).
+    #[inline(always)]
+    pub fn height(&self, f: i32) -> i32 {
+        let f = if f < self.t0 {
+            self.t0
+        } else if f > F_FULL - 1 {
+            F_FULL
+        } else {
+            f
+        };
+        self.entry(f)
+    }
+
+    #[inline(always)]
+    fn entry(&self, f: i32) -> i32 {
+        match self.table {
+            Some(tab) => tab.get((f - self.t0) as usize).map_or(0, |&h| h as i32),
+            None => self.curves.at(self.t, f),
+        }
     }
 }
 
@@ -240,6 +321,35 @@ mod tests {
             }
         }
         assert_eq!(c.height(2, 5000), 0);
+    }
+
+    #[test]
+    fn tables_match_interpolation() {
+        // custom records 0/1 of bank 1: a coarse curve with duplicates, and one starting below t0
+        let mut g = Global::zeroed();
+        let recs: [&[i16]; 2] = [&[-40, -40, 0, 100, 100, 700, 2000, 2700, 2700], &[-300, -100, 500, 1500, 2400, 2800]];
+        for (i, pts) in recs.iter().enumerate() {
+            use crate::config::cs;
+            let r = g.custom_switch_mut(i);
+            r[cs::TRAVEL..cs::TRAVEL + 4].copy_from_slice(&(3500 + 100 * i as u32).to_le_bytes());
+            r[cs::POINTS..cs::POINTS + 4].copy_from_slice(&(pts.len() as u32).to_le_bytes());
+            for (k, v) in pts.iter().enumerate() {
+                r[cs::CURVE + 2 * k..cs::CURVE + 2 * k + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let used = [true; TYPES];
+        let mut plain = Curves::new();
+        plain.build(&used, &g);
+        for slots in [1usize, 3, 8] {
+            let mut c = Curves::new();
+            c.set_tables(Box::leak(vec![[0i16; HEIGHT_TABLE_LEN]; slots].into_boxed_slice()));
+            c.build(&used, &g);
+            for t in 0..TYPES as u8 {
+                for f in -400..3000 {
+                    assert_eq!(c.height(t, f), plain.height(t, f), "slots {slots} type {t} f {f}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -160,6 +160,13 @@ impl Keyboard {
         self.lighting.configure(&mut self.profile);
     }
 
+    /// Hand the engine storage for its precomputed height tables (one per switch type in use,
+    /// ~5.3 KB each; the platform puts them wherever it has RAM). Call any time, typically once
+    /// at start-up; without them heights are interpolated on the fly (slower, same results).
+    pub fn set_height_tables(&mut self, tables: &'static mut [crate::engine::curves::HeightTable]) {
+        self.engine.set_height_tables(tables);
+    }
+
     // ------------------------------------------------------------------ state
 
     pub fn global(&self) -> &Global {
