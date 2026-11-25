@@ -32,9 +32,10 @@ use hpm_hal::pac;
 use hpm_hal::peripherals;
 use hpm_hal::usb::{EndpointState, UsbDriver};
 use static_cell::StaticCell;
-use zent_core::hid::descriptor;
+use zent_core::hid::{descriptor, HidReports};
 use zent_core::protocol::REPORT_SIZE;
 
+use crate::scan::HidSignal;
 use crate::{kb, log, plic, scan, StoreRef};
 
 /// USB0 binding. Not `hpm_hal::bind_interrupts!`: its handler completes through hpm-hal's
@@ -221,72 +222,63 @@ async fn usb_run(mut dev: embassy_usb::UsbDevice<'static, Driver>) -> ! {
     dev.run().await
 }
 
-#[embassy_executor::task]
-async fn keyboard_task(mut ep: EpIn) -> ! {
-    let mut last = [0xFFu8; 16];
-    let mut last_boot = false;
+/// One input report: up to 16 bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Report {
+    data: [u8; 16],
+    len: usize,
+}
+
+impl Report {
+    fn new(bytes: &[u8]) -> Self {
+        let mut data = [0; 16];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Self { data, len: bytes.len() }
+    }
+}
+
+/// Send `current()` on `ep` whenever `signal` fires and the report differs from the one the
+/// host last got (stock sends on change only).
+async fn send_on_change(mut ep: EpIn, signal: &HidSignal, current: impl Fn(&HidReports) -> Report) -> ! {
+    let mut sent = None;
     loop {
         ep.wait_enabled().await;
-        scan::HID_KBD.wait().await;
+        signal.wait().await;
         loop {
-            let h = kb::with(|kb| *kb.hid());
-            let boot = BOOT_PROTOCOL.load(Ordering::Relaxed);
-            let r = h.keyboard;
-            if r == last && boot == last_boot {
+            let r = kb::with(|kb| current(kb.hid()));
+            if sent == Some(r) {
                 break;
             }
             wake_host().await;
-            let res = if boot { ep.write(&h.boot_report()).await } else { ep.write(&r).await };
-            if res.is_err() {
-                last = [0xFF; 16];
+            if ep.write(&r.data[..r.len]).await.is_err() {
+                sent = None; // endpoint disabled: resend once it is back
                 break;
             }
-            last = r;
-            last_boot = boot;
+            sent = Some(r);
         }
     }
 }
 
 #[embassy_executor::task]
-async fn consumer_task(mut ep: EpIn) -> ! {
-    let mut last = [0xFFu8; 3];
-    loop {
-        ep.wait_enabled().await;
-        scan::HID_CONSUMER.wait().await;
-        loop {
-            let r = kb::with(|kb| kb.hid().consumer);
-            if r == last {
-                break;
-            }
-            wake_host().await;
-            if ep.write(&r).await.is_err() {
-                last = [0xFF; 3];
-                break;
-            }
-            last = r;
+async fn keyboard_task(ep: EpIn) -> ! {
+    send_on_change(ep, &scan::HID_KBD, |h| {
+        if BOOT_PROTOCOL.load(Ordering::Relaxed) {
+            Report::new(&h.boot_report())
+        } else {
+            Report::new(&h.keyboard)
         }
-    }
+    })
+    .await
 }
 
 #[embassy_executor::task]
-async fn mouse_task(mut ep: EpIn) -> ! {
-    let mut last = [0xFFu8; 3];
-    loop {
-        ep.wait_enabled().await;
-        scan::HID_MOUSE.wait().await;
-        loop {
-            let r = kb::with(|kb| kb.hid().mouse_report());
-            if r == last {
-                break;
-            }
-            wake_host().await;
-            if ep.write(&r).await.is_err() {
-                last = [0xFF; 3];
-                break;
-            }
-            last = r;
-        }
-    }
+async fn consumer_task(ep: EpIn) -> ! {
+    send_on_change(ep, &scan::HID_CONSUMER, |h| Report::new(&h.consumer)).await
+}
+
+#[embassy_executor::task]
+async fn mouse_task(ep: EpIn) -> ! {
+    send_on_change(ep, &scan::HID_MOUSE, |h| Report::new(&h.mouse_report())).await
 }
 
 type VendorIn = Mutex<NoopRawMutex, EpIn>;

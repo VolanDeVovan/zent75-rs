@@ -138,9 +138,10 @@ static LAST_DONE: AtomicU32 = AtomicU32::new(0);
 static LAST_GEN: AtomicU32 = AtomicU32::new(0);
 
 /// Raised whenever `Keyboard::hid_generation()` moves (one per HID IN endpoint task).
-pub static HID_KBD: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-pub static HID_CONSUMER: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-pub static HID_MOUSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+pub static HID_KBD: HidSignal = Signal::new();
+pub static HID_CONSUMER: HidSignal = Signal::new();
+pub static HID_MOUSE: HidSignal = Signal::new();
+pub type HidSignal = Signal<CriticalSectionRawMutex, ()>;
 
 /// Tell the HID endpoint tasks to look at the reports again.
 pub fn signal_hid() {
