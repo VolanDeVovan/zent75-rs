@@ -638,8 +638,13 @@ class Machine:
         uc.reg_write(R.UC_RISCV_REG_PC, addr + 4)
 
     def _on_panic(self, uc, addr, size, _):
+        """A panic / default handler is a failure; keep running a little so the panic message
+        reaches UART0 and the handler's exit path (e.g. the jump to the loader) is visible."""
         ra = uc.reg_read(R.UC_RISCV_REG_RA)
-        self.fail("panic", f"reached {self.sym(addr)} (called from {self.sym(ra)})")
+        first = not any(f.kind == "panic" for f in self.findings)
+        self.fail("panic", f"reached {self.sym(addr)} (called from {self.sym(ra)})", stop=False)
+        if first:
+            self.end_cycles = min(self.end_cycles, self.cycles + CPU_HZ * 3)
 
     def _on_boot_region(self, uc, addr, size, _):
         if addr == LOADER_ENTRY:

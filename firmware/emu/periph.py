@@ -350,6 +350,16 @@ class Hdma(RegFile):
             self.regs[self.INTTC] = self.regs.get(self.INTTC, 0) | (1 << ch)
 
 
+class XpiGuard(RegFile):
+    """XPI0 controller registers. Any write is a hard failure: flash must only be changed through
+    the ROM NOR API, where the gate can check the address range."""
+
+    def write(self, off, size, value):
+        super().write(off, size, value)
+        self.m.fail("flash-gate", f"direct write {value:#x} to {self.name} controller register +{off:#x} "
+                    "(bypasses the ROM API range check)")
+
+
 class Ioc(RegFile):
     """Pin mux. Plain register file; Machine reports FUNC_CTL against the expected table."""
 
@@ -369,6 +379,7 @@ def default_models(m) -> list[Periph]:
         Ewdg(m, "EWDG0", 0xF00B0000),
         Ewdg(m, "EWDG1", 0xF00B4000),
         Hdma(m, "HDMA", 0xF00C8000),
+        XpiGuard(m, "XPI0", 0xF3000000, 0x4000),
     ]
 
 

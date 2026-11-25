@@ -308,3 +308,19 @@ def test_pwm0_hardware_trigger_rate():
     assert res.ok, res.text
     n = struct.unpack("<I", res.m.uc.mem_read(COUNTER, 4))[0]
     assert 14 <= n <= 17, n  # 8 periods x 2 triggers in 1 ms
+
+
+def test_direct_xpi_controller_write_fails():
+    res = run_words(store(0xF3000000, 1) + IDLE)
+    assert "flash-gate" in kinds(res), res.text
+
+
+def test_panic_handler_is_a_failure_but_keeps_running():
+    words = li(T0, APP + 4 + 4 * 3) + jalr(ZERO, T0) + store(0xF0040020, ord("P")) + IDLE
+    img = image(words)
+    target = APP + 4 + 4 * 3
+    img.symbols = [(target, 4, "rust_begin_unwind")]
+    img._addrs = [target]
+    res = gate(img, ms=2, show_mmio=False)
+    assert "panic" in kinds(res), res.text
+    assert res.m.first_wfi is not None  # ran on after the panic entry
