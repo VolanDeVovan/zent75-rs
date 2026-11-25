@@ -335,13 +335,19 @@ impl Keyboard {
         if off >= end {
             return; // entirely past the shadow (stock: preview area / live RAM)
         }
-        let before = self.global.clone();
-        self.global.0[off..end].copy_from_slice(&data[..end - off]);
+        // keep the overwritten bytes (≤ 512) for the discard case, not a copy of the bank
+        let mut old = [0u8; 512];
+        let n = end - off;
+        old[..n].copy_from_slice(&self.global.0[off..end]);
+        let words = &self.global.0[b1::SOFT_VERSION..b1::CUR_PARAM_NUM + 4];
+        let mut owned = [0u8; 12];
+        owned.copy_from_slice(words);
+        self.global.0[off..end].copy_from_slice(&data[..n]);
         // firmware-owned words (deviation: stock lets the host overwrite them)
-        self.global.0[b1::SOFT_VERSION..b1::SOFT_VERSION + 4].copy_from_slice(&before.0[b1::SOFT_VERSION..b1::SOFT_VERSION + 4]);
-        self.global.0[b1::CUR_PARAM_NUM..b1::CUR_PARAM_NUM + 4].copy_from_slice(&before.0[b1::CUR_PARAM_NUM..b1::CUR_PARAM_NUM + 4]);
+        self.global.0[b1::SOFT_VERSION..b1::CUR_PARAM_NUM + 4].copy_from_slice(&owned);
         if self.global.calibration_implausible() {
-            self.global = before;
+            self.global.0[off..end].copy_from_slice(&old[..n]);
+            self.global.0[b1::SOFT_VERSION..b1::CUR_PARAM_NUM + 4].copy_from_slice(&owned);
             return;
         }
         self.save_global(st);
@@ -388,9 +394,12 @@ impl Keyboard {
 
     /// Keycode 319: erase bank 1 and all profiles; the next boot is a first boot.
     fn wipe(&mut self, st: &mut impl Storage) {
-        let _ = st.store(Slot::Global, &[0xFF; BANK1_SIZE]);
+        // blank images live in flash, not on the stack
+        static BLANK1: [u8; BANK1_SIZE] = [0xFF; BANK1_SIZE];
+        static BLANK2: [u8; BANK2_SIZE] = [0xFF; BANK2_SIZE];
+        let _ = st.store(Slot::Global, &BLANK1);
         for p in 0..PROFILE_COUNT {
-            let _ = st.store(Slot::Profile(p as u8), &[0xFF; BANK2_SIZE]);
+            let _ = st.store(Slot::Profile(p as u8), &BLANK2);
         }
         self.wipe_left = Some(WIPE_BLINK_SCANS);
     }
