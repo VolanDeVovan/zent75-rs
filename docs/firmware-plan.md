@@ -6,18 +6,18 @@ Rust on **embassy + `hpm-hal`** (feature `hpm5361`), target `riscv32imafc-unknow
 | Part | Status |
 |---|---|
 | `core/` — `zent-core`: config banks, engine, keys, lighting, protocol; `Keyboard` API in `device/` | complete; diff-tested against the emulated stock firmware |
-| `app/` — board layer running `Keyboard` on the HPM5361 | complete first version, **not flashed**; needs the bring-up checklist below |
+| `app/` — board layer running `Keyboard` on the HPM5361 | **runs on the real keyboard**; hardware status in the checklist below |
 | `sim/` — host simulator (uhid) | runs `Keyboard` with a sensor model |
 | `emu/` — unicorn pre-flash gate for our ELF | run before every flash |
-
-Nothing custom has been flashed yet.
+| `hpm-hal/` — local copy of the HAL with five fixes found on the board (`PATCHES.md`) | candidates for upstream |
 
 ## Why Rust
 
 `hpm-hal` (official HPMicro org) supports HPM5300 best: ADC16 sequences, USB HS via embassy-usb,
 SPI/DMA, XPI NOR through `embedded-storage`. **libhmk** (GPL-3.0, C) is the algorithm reference
 only (rapid trigger, SOCD, DKS, auto-calibration) — reimplement, do not copy. Fall back to C
-(hpm_sdk + CherryUSB) only if 8 kHz HS HID proves impossible on `hpm-hal`.
+(hpm_sdk + CherryUSB) only if 8 kHz HS HID proves impossible on `hpm-hal` — it did not: with the
+fixes in `firmware/hpm-hal/PATCHES.md` the device enumerates at high speed and scans at 8 kHz.
 
 ## Packaging and flashing
 
@@ -26,8 +26,6 @@ only (rapid trigger, SOCD, DKS, auto-calibration) — reimplement, do not copy. 
 - `firmware/package-uf2.sh` → `firmware/zent75-rs.uf2` (family `0x0B4D5475`).
 - Flash with `tools/flash_uf2.py` (refuses images outside the app region). Recovery and rules:
   `boot-recovery.md` — a hung build is recovered by holding A+S+D at plug-in.
-- Early bring-up: consider building without the signature first (stage-0 then never runs it) only
-  to test packaging; real runs need the signature.
 
 ## Protocol
 
@@ -36,19 +34,27 @@ protocol can come later behind the panel's `KeyboardProtocol` interface.
 
 ## Milestones
 
-1. **Boots** — signature-valid image runs; UART0 banner, `BE FC` handler early so every later build
-   can return to the loader without the recovery keys.
+All five are implemented; what has been seen working on the keyboard is in
+[Hardware status](#hardware-status).
+
+1. **Boots** — signature-valid image runs; console banner, `BE FC` so every build can return to
+   the loader without the recovery keys. *On hardware.*
 2. **USB** — HS enumeration with the four interfaces of `hardware.md`; 8 kHz on the boot keyboard
-   endpoint (`bInterval = 1`). Main technical risk.
+   endpoint (`bInterval = 1`). *On hardware.*
 3. **Scan** — PWM1 P4–P7 mux addressing, ADC0/ADC1 sequences on PB00/01/08–13, 88 slots at 8 kHz;
-   `BE FD` stream so the panel's live view works; verify the slot→key table on hardware.
+   `BE FD` stream so the panel's live view works. *On hardware; the slot→key table still to be
+   checked key by key.*
 4. **HE engine** — baseline (not from held keys), calibration, travel, actuation, rapid trigger,
    deadzones, SOCD, DKS / key groups, profiles, config banks in NOR (range-checked writes).
-5. **RGB** — 85 × WS2812 on SPI1 + DMA.
+   *Bit-exact against stock in tests; typing and config persistence on hardware open.*
+5. **RGB** — 85 × WS2812 on SPI1 + DMA. *Colours and order on hardware open.*
 
 ## Risks
 
-- 8 kHz HS HID on `hpm-hal` is unproven — validate at milestone 2.
+- CPU budget: a scan takes 73 µs of the 125 µs period on hardware (CPU ~68 %). Changes to the
+  engine or key pipeline must be measured (`tools/profile.py`, the console statistics line).
+- DLM is nearly full (about 113 of 128 KB with the 16 KB stack; the linker script asserts the
+  stack still fits). Big tables go to AHB SRAM.
 - A config-layout change would break the stock firmware's banks: keep the stock layout as long as we
   want to switch back and forth.
 
@@ -58,28 +64,49 @@ protocol can come later behind the panel's `KeyboardProtocol` interface.
 https://github.com/peppapighs/libhmk · hpm_sdk TinyUF2 sample · `hpm_isp`
 https://github.com/tfx2001/hpm_isp
 
-## Board-layer bring-up checklist (in order of risk)
+## Hardware status
 
-Each step on the real keyboard only after `emu/run.py` passes, with a fresh `tools/dump_all.py`
-backup, and with the owner available for A+S+D. Watch UART0 (PA00, 115 200) if the case is open.
+Every step on the real keyboard only after `emu/run.py` passes, with a fresh `tools/dump_all.py`
+backup, and with the owner available for A+S+D. The console is read over USB with
+`tools/console.py` (or UART0 on PA00, 115 200, if the case is open).
 
-1. **Boot + console + `BE FC`.** Banner, reset flags, `flash: 1 MB NOR ready`, UID, "config: …
-   defaults written for empty slots: false" (the stock banks must load as-is — if `true`, stop:
-   the empty rule in `core/src/storage/nor.rs` rejected a stock bank). Then `BE FC` must land in
-   the UF2 loader and the drive must **stay** up > 10 s (proves EWDG0 is stopped before the jump;
-   else set `system::WATCHDOG_ENABLED = false`).
-2. **USB enumeration at high speed** (`lsusb -v`: 36B0:357E, four interfaces, bInterval 1, HS),
-   hidraw nodes, `BE 1D`/`BE 04` reads via `tools/` match the backup.
-3. **Scan sanity**: console `scan 8000/s`, `drop`/`miss`/`badch`/`adc1late` stay 0, `seq` min/max
-   inside 641..2459 ticks (else adjust `SEQ_DONE_TICKS`), `cflct` (ADC trigger while busy) 0, CPU %.
-   `BE FD` stream in the panel shows ~30000 at rest per key.
-4. **Slot → key map**: press keys one by one in the panel's live view. If every key lights its
-   neighbour one mux step away, change `scan::STEP_OFFSET` (the open one-step question).
-5. **Typing**: NKRO report, modifiers, consumer keys, Caps LED (`SET_REPORT`).
-6. **Config write**: change one value in the panel + `BE 02`; console must show
-   `flash: 1 slot(s) saved, 0 failed, 0 refused since boot`; dump + `tools/restore.py` verify; replug; value persists. Then roll back with
-   `tools/restore.py` and check stock 0.0.18 still reads the banks (`tools/rollback.sh` dry run).
-7. **RGB**: colours and GRB order correct, no flicker (SPI1 at 12 MHz assumed from a 24 MHz
-   source; `rgb.rs` documents the alternative write-only SPI mode).
-8. **Watchdog**: confirm `PPOR_FLAG_EWDG0` (bit 16) by a deliberate hang build only if needed.
-9. **`BE FF`** reboot, remote wakeup from host suspend, boot-protocol keyboard in a BIOS.
+### Verified on the keyboard
+
+| What | How it shows |
+|---|---|
+| Boot | banner, clocks, `flash: 1 MB NOR ready`, UID on the console |
+| Stock config banks load unchanged | `config: … defaults written for empty slots: false` |
+| USB high speed, four interfaces | `lsusb -v`: `36B0:357E`, bInterval 1; `usb: configured, high speed` |
+| Vendor protocol | `tools/` reads (`BE 04`, `BE 1D`) match the backup; the panel connects |
+| `BE FC` | lands in the UF2 loader and the drive stays up (EWDG0 is stopped before the jump); `tools/flash_uf2.py` and `tools/rollback.sh` rely on it |
+| Scan at 8 kHz | `scan 8000/s`, avg 73 µs per scan, CPU ~68 % |
+| `BE FD` stream | live view in the panel |
+| Debug console, crash record, profiler over USB | `tools/console.py`, `tools/profile.py` |
+
+Found and fixed during bring-up: the hpm-hal bugs in `firmware/hpm-hal/PATCHES.md` (USB
+completion clearing, endpoint enable, VBUS events without a sense pin, PLIC priority index and
+completion), and ADC steps captured too late (`scan.rs`, `LATEST_TICKS`: a torn DMA buffer read
+as a key press; such steps are now dropped and counted as `late`).
+
+### Not verified yet (in order of risk)
+
+1. **Slot → key map and typing end to end**: every key in the panel's live view and in a text
+   editor; NKRO report, modifiers, consumer keys, Caps LED (`SET_REPORT`), tap-hold, SOCD, DKS.
+   If every key lights its neighbour one mux step away, change `scan::STEP_OFFSET`. Building
+   with `--features key-log` logs the key objects on every HID change.
+2. **Scan health under load**: `drop`/`miss`/`badch`/`adc1late`/`cflct` stay 0 while typing with
+   the panel streaming; `late` may count up slowly (dropped steps), `seq` stays inside
+   641..2459 ticks (else adjust `SEQ_DONE_TICKS`).
+3. **Config write + persist**: change one value in the panel + `BE 02`; the console must show
+   `flash: 1 slot(s) saved, 0 failed, 0 refused since boot`; dump + `tools/restore.py` verify;
+   replug; the value persists. Then roll back with `tools/restore.py` and check stock 0.0.18
+   still reads the banks.
+4. **RGB**: colours and GRB order, no flicker (SPI1 at 12 MHz assumed from a 24 MHz source;
+   `rgb.rs` documents the alternative write-only SPI mode), effects against stock.
+5. **`BE FF`** reboot (PPOR software reset through stage-0).
+6. **Suspend / remote wakeup**: LEDs off on host suspend, a key wakes the host.
+7. **Watchdog reset path**: `PPOR_FLAG_EWDG0` (bit 16) is taken from hpm_sdk, not measured. Only
+   a deliberate hang build can confirm it (the boot after the reset must go to the loader, and
+   the next start must log `previous run: thread mode stalled at pc …`). The reset flags are
+   logged at every boot.
+8. Boot-protocol keyboard in a BIOS.

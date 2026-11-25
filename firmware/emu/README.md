@@ -52,8 +52,9 @@ ELF when built; the module is skipped when unicorn is not installed).
 | OTP | `program` / `lock` (irreversible) |
 | stack | `sp` leaves the linker `.stack` region after entering it (peak use is reported) |
 | watchdog | EWDG expires with `ot_rst_en` (feeds and the longest gap are reported) |
-| scan budget | the firmware's own `scan::STATS` (mcycle around `Keyboard::scan`) average > `--scan-budget`; scans, drops, cycles/scan and ADC-ISR cost are reported |
+| scan budget | the firmware's own `scan::STATS` (mcycle around `Keyboard::scan`) average > `--scan-budget`; scans, drops, cycles/scan and ADC-ISR cost are reported; bad channels, trigger conflicts, missing or late mux steps are warnings |
 | HID | with `--press`: `scan::LAST_GEN` (written when `Keyboard::hid_generation` moves) is not written while a press is held (+20 ms) |
+| USB attach | `USBCMD.RS` not set within 1.5 s, or cleared again by the end of the run. `OTGSC.ASV/AVV` follow the PHY VBUS override only after a delay, as on the board: a driver that trusts ASV for power events detaches |
 | UART | `--banner` given and not seen |
 | pin mux | IOC/PIOC `FUNC_CTL` of a board pad written with a different function than the table below; with `--strict-pinmux` also pads never written |
 | loader jump | with `--enter-bootloader`/`--expect-bootloader`: no jump to `0x80020000`, or L1 caches still on, or a watchdog still running (MIE / PLIC enables / USB run bit left on are warnings) |
@@ -138,7 +139,7 @@ for interrupts, `self.m.fail/warn/event` for findings, `self.m.time_poll()` in t
   hall model; PWM CNT runs from virtual time; PWM1 (mux address) is a register file — the mux
   step is the trigger index inside the PWM0 period.
 - Scan cost: IPC 1, no cache misses, so real hardware needs at least as many cycles as reported.
-- The scan/HID probes read `zent75_rs::scan::STATS` (field order as declared) and
+- The scan/HID checks read `zent75_rs::scan::STATS` (field order as declared) and
   `zent75_rs::scan::LAST_GEN`; renaming them in the app silently disables those checks.
 - HDMA completes instantly without moving data; SPI1/WS2812 frames are not decoded.
 - GPTMR clock assumed 24 MHz, EWDG bus clock 160 MHz.

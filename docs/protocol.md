@@ -38,6 +38,22 @@ BE <cmd> <len:LE16> <payload…> [<crc:LE16>] ED        zero-padded to 1024 byte
 
 Every other command byte is ignored.
 
+### Debug commands (our firmware only)
+
+Not part of the stock protocol; implemented in the board layer (`firmware/app/src/debug/mod.rs`),
+never in the stock dispatcher. Request `BE <cmd> 0D 00 "ZDBG" <arg LE32> ED` (13 bytes: the
+signature and fixed length keep it apart from every stock frame), reply
+`BE <cmd> <len LE16> <a LE32> <b LE32> <payload> ED`.
+
+| cmd | `arg` | Reply `a`, `b`, payload |
+|---|---|---|
+| `D0` | console position | bytes logged since boot, position of the first payload byte, log text (`tools/console.py`) |
+| `D1` | first sample index | samples taken, first sample index, sampled PCs as LE32 (`tools/profile.py`) |
+| `D2` | — | starts a profiler capture, then replies like `D1` |
+
+Stock ignores these bytes like any unknown command, but the tools still never send them to it:
+`zentlib.Zent.debug_request` reads `soft_version` first and refuses anything below 1.0.0.
+
 ## Address validation (`BE 03` / `BE 04`)
 
 | Bank | `addr` ≥ | `addr + n` ≤ | RAM shadow |
