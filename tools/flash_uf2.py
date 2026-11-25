@@ -10,6 +10,8 @@ Flow (all without a human replug):
 
 Mount/umount/blockdev need sudo (authorized for this board).
 
+Refuses to run with ZENT_SIM / ZENT_HIDRAW set (those point the tools at the host simulator).
+
 Safety: every image is checked before anything is sent to the board (`check_uf2`). Blocks may only
 target the application region 0x80040000..0x8006FFFF. 0x80000000..0x8003FFFF holds the boot header,
 stage-0 (the hold-A+S+D recovery trigger) and the download loader; overwriting it removes the only
@@ -27,7 +29,7 @@ import time
 
 import uf2
 from uf2 import FAMILY_ID
-from zentlib import CMD_BOOTLOADER, Zent, find_hidraw, wait_device
+from zentlib import CMD_BOOTLOADER, ENV_HIDRAW, ENV_SIM, Zent, find_hidraw, sim_selected, wait_device
 
 PROTECTED = (0x80000000, 0x80040000)  # boot header + stage-0 (A+S+D recovery) + download loader
 APP_REGION = (0x80040000, 0x80070000)  # application; config banks start at 0x80070000
@@ -118,6 +120,12 @@ def mount_rw(disk):
 
 
 def flash(uf2_path, enter=True, expect=None, settle=40):
+    if sim_selected():
+        # The simulator (firmware/sim) is never a flash target, and a sim-pointed environment
+        # must never reach the real board's bootloader either.
+        log(f"REFUSED: {ENV_SIM}/{ENV_HIDRAW} is set (simulator mode); flashing only works "
+            "on the real board with a clean environment")
+        return 8
     uf2_path = os.path.abspath(uf2_path)
     if not uf2_path.endswith(".uf2") or not os.path.exists(uf2_path):
         log(f"not a .uf2 file: {uf2_path}")

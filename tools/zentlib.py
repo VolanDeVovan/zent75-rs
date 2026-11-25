@@ -259,9 +259,63 @@ def pack_u16(values: Sequence[int]) -> bytes:
 
 # ---------------------------------------------------------------------------- device discovery
 
+#: Product id of the host simulator (firmware/sim). Never the real board's PID.
+SIM_PID = 0x5A11
+#: Opt-in to the simulator: ``ZENT_SIM=1`` finds it, ``ZENT_HIDRAW=/dev/hidrawN`` names its node.
+ENV_SIM, ENV_HIDRAW = "ZENT_SIM", "ZENT_HIDRAW"
+SYSFS_HIDRAW = "/sys/class/hidraw"
+_VENDOR_DESCRIPTOR_PREFIX = bytes([0x06, 0x60, 0xFF, 0x09, 0x61])  # usage page 0xFF60, usage 0x61
+
+
+class SimTargetError(ZentError):
+    """ZENT_HIDRAW names a node that is not the simulator."""
+
+
+def sim_selected() -> bool:
+    """True when the environment points the tools at the simulator instead of the board."""
+    return bool(os.environ.get(ENV_HIDRAW)) or os.environ.get(ENV_SIM, "") not in ("", "0")
+
+
+def _is_sim_node(sys_node: str) -> bool:
+    try:
+        with open(sys_node + "/device/uevent") as f:
+            if f"HID_ID=0003:{VID:08X}:{SIM_PID:08X}" not in f.read():
+                return False
+        with open(sys_node + "/device/report_descriptor", "rb") as f:
+            return f.read(len(_VENDOR_DESCRIPTOR_PREFIX)) == _VENDOR_DESCRIPTOR_PREFIX
+    except OSError:
+        return False
+
+
+def find_sim_hidraw() -> Optional[str]:
+    """/dev/hidrawN of the simulator's vendor device (36B0:5A11, usage page 0xFF60), or None.
+
+    With ``ZENT_HIDRAW`` set, that node is returned if (and only if) it is the simulator.
+    """
+    explicit = os.environ.get(ENV_HIDRAW)
+    if explicit:
+        name = os.path.basename(explicit)
+        if not _is_sim_node(os.path.join(SYSFS_HIDRAW, name)):
+            if not os.path.exists(os.path.join(SYSFS_HIDRAW, name)):
+                return None  # not there (yet): behave like "device not present"
+            raise SimTargetError(f"{ENV_HIDRAW}={explicit} is not the simulator "
+                                 f"({VID:04X}:{SIM_PID:04X}); refusing to use it")
+        return "/dev/" + name
+    for p in sorted(glob.glob(SYSFS_HIDRAW + "/hidraw*")):
+        if _is_sim_node(p):
+            return "/dev/" + os.path.basename(p)
+    return None
+
+
 def find_hidraw(iface: int = RAW_HID_INTERFACE) -> Optional[str]:
-    """Return /dev/hidrawN of the vendor raw-HID interface, or None."""
-    for p in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+    """Return /dev/hidrawN of the vendor raw-HID interface, or None.
+
+    The real board (36B0:357E, USB interface ``iface``) unless :func:`sim_selected`, in which
+    case only the simulator (36B0:5A11) is considered.
+    """
+    if sim_selected():
+        return find_sim_hidraw()
+    for p in sorted(glob.glob(SYSFS_HIDRAW + "/hidraw*")):
         try:
             with open(p + "/device/uevent") as f:
                 ue = f.read()
@@ -304,7 +358,8 @@ class Zent:
             return
         self.dev = dev or find_hidraw()
         if not self.dev:
-            raise ZentError("ZENT75-HE raw HID interface not found")
+            raise ZentError("ZENT75 simulator not found" if sim_selected()
+                            else "ZENT75-HE raw HID interface not found")
         self.fd = os.open(self.dev, os.O_RDWR)
 
     def __enter__(self) -> "Zent":

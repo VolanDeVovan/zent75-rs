@@ -9,6 +9,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+if [ -n "${ZENT_HIDRAW:-}" ] || { [ -n "${ZENT_SIM:-}" ] && [ "${ZENT_SIM}" != 0 ]; }; then
+  echo "REFUSED: ZENT_SIM/ZENT_HIDRAW is set (simulator mode); rollback is for the real board only" >&2
+  exit 8
+fi
+
 IMAGE="${1:-firmware/vendor/0.0.18.uf2}"
 BACKUP="${2:-$(ls -1d backups/*/ 2>/dev/null | sort | tail -1)}"
 EXPECT="$(basename "$IMAGE" .uf2)"   # e.g. 0.0.18

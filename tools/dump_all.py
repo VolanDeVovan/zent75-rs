@@ -14,7 +14,7 @@ import sys
 import time
 
 from rammap import ADVANCED_KEYS_MIN_VERSION, PROFILE_COUNT, REGIONS, is_advanced
-from zentlib import Zent, format_version, wait_device
+from zentlib import ENV_HIDRAW, ENV_SIM, Zent, format_version, sim_selected, wait_device
 
 BACKUP_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backups")
 
@@ -62,8 +62,14 @@ def write_backup(directory: str, meta: dict, profiles: dict[int, dict[str, dict]
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("device", nargs="?", help="hidraw node (default: auto-detect, wait up to 20 s)")
-    ap.add_argument("--out", default=BACKUP_ROOT, help="backup root directory (default: %(default)s)")
+    ap.add_argument("--out", help=f"backup root directory (default: {BACKUP_ROOT}; "
+                    "required in simulator mode)")
     args = ap.parse_args()
+    if args.out is None:
+        if sim_selected():
+            # backups/ feeds tools/rollback.sh ("latest backup"): never put a sim dump there.
+            ap.error(f"{ENV_SIM}/{ENV_HIDRAW} is set (simulator mode): pass --out DIR")
+        args.out = BACKUP_ROOT
 
     dev = args.device or wait_device(20)
     if not dev:
