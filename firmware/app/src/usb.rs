@@ -27,7 +27,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::driver::{
-    EndpointAddress, EndpointAllocError, EndpointIn, EndpointOut, EndpointType, Event, Unsupported,
+    Endpoint as _, EndpointAddress, EndpointAllocError, EndpointIn, EndpointOut, EndpointType, Event, Unsupported,
 };
 use embassy_usb::{Builder, Handler};
 use hpm_hal::pac;
@@ -317,17 +317,6 @@ async fn usb_run(mut dev: embassy_usb::UsbDevice<'static, Driver>) -> ! {
     dev.run().await
 }
 
-/// Wait until the host configured us and `ep` is open. hpm-hal opens the endpoints on
-/// SET_CONFIGURATION without waking tasks parked in `wait_enabled` (only a bus reset wakes
-/// them), so a task that got there first would sleep forever — the keyboard enumerated but
-/// sent nothing and ignored vendor frames. `CONFIGURED` is set after the endpoints are open.
-async fn endpoint_ready(ep: &mut impl embassy_usb::driver::Endpoint) {
-    while !CONFIGURED.load(Ordering::Relaxed) {
-        Timer::after_millis(1).await;
-    }
-    ep.wait_enabled().await;
-}
-
 /// One input report: up to 16 bytes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Report {
@@ -348,7 +337,7 @@ impl Report {
 async fn send_on_change(mut ep: EpIn, signal: &HidSignal, current: impl Fn(&HidReports) -> Report) -> ! {
     let mut sent = None;
     loop {
-        endpoint_ready(&mut ep).await;
+        ep.wait_enabled().await;
         signal.wait().await;
         loop {
             let r = kb::with(|kb| current(kb.hid()));
@@ -389,18 +378,35 @@ async fn mouse_task(ep: EpIn) -> ! {
 
 type VendorIn = Mutex<NoopRawMutex, EpIn>;
 
+/// Debug console read (this firmware only, see `tools/console.py`).
+const CMD_CONSOLE: u8 = 0xD0;
+
 /// Vendor OUT 0x03 → `Keyboard::vendor_in` → reply on IN 0x82.
 #[embassy_executor::task]
 async fn vendor_out_task(mut ep: EpOut, tx: &'static VendorIn, store: StoreRef) -> ! {
     let mut rx = [0u8; REPORT_SIZE];
     let mut reply = [0u8; REPORT_SIZE];
     loop {
-        endpoint_ready(&mut ep).await;
+        ep.wait_enabled().await;
         let n = match ep.read(&mut rx).await {
             Ok(n) => n,
             Err(_) => continue,
         };
         reply.fill(0);
+        if n >= 9 && rx[0] == 0xBE && rx[1] == CMD_CONSOLE {
+            // Debug console read (ours only; never sent to stock): `BE D0 09 00 <from u32> ED`
+            // → `BE D0 <len u16> <total u32> <start u32> <text…> ED`.
+            let from = u32::from_le_bytes([rx[4], rx[5], rx[6], rx[7]]);
+            let (total, start, len) = crate::console::history(from, &mut reply[12..REPORT_SIZE - 1]);
+            reply[0] = 0xBE;
+            reply[1] = CMD_CONSOLE;
+            reply[2..4].copy_from_slice(&((13 + len) as u16).to_le_bytes());
+            reply[4..8].copy_from_slice(&total.to_le_bytes());
+            reply[8..12].copy_from_slice(&start.to_le_bytes());
+            reply[12 + len] = 0xED;
+            let _ = tx.lock().await.write(&reply).await;
+            continue;
+        }
         let replied = kb::with(|kb| kb.vendor_in(&rx[..n], &mut *store.borrow_mut(), &mut reply));
         if replied.is_some() {
             let _ = tx.lock().await.write(&reply).await;

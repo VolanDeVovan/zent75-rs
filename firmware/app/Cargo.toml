@@ -64,3 +64,7 @@ debug = 2
 # optimisation made it ~2x slower than the 125 µs scan budget allows.
 [profile.release.package.zent-core]
 opt-level = 3
+
+# Local hpm-hal with USB fixes found on hardware (hpm-hal/PATCHES.md).
+[patch."https://github.com/hpmicro/hpm-hal"]
+hpm-hal = { path = "../hpm-hal" }

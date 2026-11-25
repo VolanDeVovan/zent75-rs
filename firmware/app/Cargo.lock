@@ -392,7 +392,6 @@ dependencies = [
 [[package]]
 name = "hpm-hal"
 version = "0.0.1"
-source = "git+https://github.com/hpmicro/hpm-hal?rev=620f58df241d541d5d5cb1575407a16351da49fd#620f58df241d541d5d5cb1575407a16351da49fd"
 dependencies = [
  "andes-riscv",
  "critical-section",
