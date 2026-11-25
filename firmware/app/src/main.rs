@@ -40,6 +40,53 @@ static STORE: ConstStaticCell<RefCell<Store>> = ConstStaticCell::new(RefCell::ne
 /// The thread-mode handle to [`STORE`].
 pub type StoreRef = &'static RefCell<Store>;
 
+/// Bring-up probe (`ZENT_PROBE=<n> ./package-uf2.sh`): jump to the UF2 loader at init stage
+/// `n`. Without a console this shows how far init gets: the loader enumerating proves the
+/// stage was reached, and the next probe can then be flashed without the recovery keys.
+/// Stages: 0 entry, 1 clocks + console, 2 watchdog + PLIC, 3 flash + config, 4 scan,
+/// 5 USB, 6 all tasks + 2 s running, 7 = 6 plus USB state encoded in the delay,
+/// 8 = USB/PHY state read from the scan interrupt (see [`probe_isr`]).
+const PROBE: Option<u8> = match option_env!("ZENT_PROBE") {
+    Some(s) if s.len() == 1 => Some(s.as_bytes()[0] - b'0'),
+    _ => None,
+};
+
+fn probe(stage: u8) {
+    if PROBE == Some(stage) {
+        log!("probe {}: jumping to the loader", stage);
+        console::flush_blocking();
+        system::enter_bootloader();
+    }
+}
+
+/// Thread-mode heartbeat for probe 8 (bumped by `health_task`).
+static THREAD_BEAT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Probe 8, run from the scan interrupt (works even if thread mode hangs): 3 s after the scan
+/// starts, jump to the loader after 1 s per set bit weight — 1: USBCMD.RS, 2: USBMODE.CM is
+/// device, 4: PHY_STATUS.UTMI_CLK_VALID, 8: PHY_CTRL1.UTMI_CFG_RST_N, 16: thread mode alive.
+pub fn probe_isr(scans: u32) {
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    static BEAT_AT_2S: AtomicU32 = AtomicU32::new(u32::MAX);
+    if PROBE != Some(8) {
+        return;
+    }
+    if scans == 16_000 {
+        BEAT_AT_2S.store(THREAD_BEAT.load(Relaxed), Relaxed);
+    }
+    if scans < 24_000 {
+        return;
+    }
+    let r = hal::pac::USB0;
+    let bits = r.usbcmd().read().rs() as u32
+        | ((r.usbmode().read().cm() == 0b10) as u32) << 1
+        | (r.phy_status().read().utmi_clk_valid() as u32) << 2
+        | (r.phy_ctrl1().read().utmi_cfg_rst_n() as u32) << 3
+        | ((THREAD_BEAT.load(Relaxed) != BEAT_AT_2S.load(Relaxed)) as u32) << 4;
+    log!("probe 8: bits {:05b}", bits);
+    system::enter_bootloader_after(bits * 1000);
+}
+
 /// Config saves are debounced: a burst of `BE 03` writes becomes one erase per slot.
 const SAVE_DEBOUNCE_MS: u64 = 300;
 /// RGB refresh period (100 Hz; a frame takes 2.7 ms on the wire).
@@ -123,6 +170,7 @@ async fn health_task() {
     let mut last_scans = 0u32;
     loop {
         system::watchdog_feed();
+        THREAD_BEAT.fetch_add(1, Ordering::Relaxed);
         Timer::after_millis(250).await;
         tick += 1;
         if tick % 4 == 0 {
@@ -181,8 +229,10 @@ fn boot_keyboard(uid: [u8; 16], store: StoreRef) {
 
 #[embassy_executor::main(entry = "hpm_hal::entry")]
 async fn main(spawner: Spawner) -> ! {
+    probe(0);
     let p = hal::init(clock_config());
     console::init();
+    probe(1);
     log!("");
     log!(
         "ZENT75-HE zent75-rs {} (protocol version {:?})",
@@ -195,6 +245,7 @@ async fn main(spawner: Spawner) -> ! {
     system::watchdog_start(p.EWDG0);
     plic::setup();
     spawner.spawn(console_task()).unwrap();
+    probe(2);
 
     let store: StoreRef = STORE.take();
     match store.borrow_mut().nor().init(p.XPI0) {
@@ -205,18 +256,35 @@ async fn main(spawner: Spawner) -> ! {
     log!("uid {:02x?}", uid);
 
     boot_keyboard(uid, store);
+    probe(3);
 
     let rgb = rgb::Rgb::new();
     scan::start(p.ADC0, p.ADC1);
     log!("scan started");
+    probe(4);
     usb::start(spawner, p.USB0, p.PA24, p.PA25, store);
     log!("usb started");
+    probe(5);
 
     spawner.spawn(service_task(store)).unwrap();
     spawner.spawn(rgb_task(rgb)).unwrap();
     spawner.spawn(health_task()).unwrap();
     log!("init done");
     console::go_async();
+    if PROBE == Some(6) {
+        Timer::after_secs(2).await;
+        probe(6);
+    }
+    if PROBE == Some(7) {
+        // USB state as a delay before the jump: +3 s OTGSC.ASV, +6 s OTGSC.AVV, +12 s USBCMD.RS
+        Timer::after_secs(2).await;
+        let r = hal::pac::USB0;
+        let (otg, run) = (r.otgsc().read(), r.usbcmd().read().rs());
+        let extra = 3 * otg.asv() as u64 + 6 * otg.avv() as u64 + 12 * run as u64;
+        log!("probe 7: asv {} avv {} rs {}", otg.asv(), otg.avv(), run);
+        Timer::after_secs(extra).await;
+        probe(7);
+    }
 
     loop {
         Timer::after_secs(3600).await;

@@ -162,9 +162,15 @@ fn quiesce() {
 
 /// Leave for the stock UF2 download loader (stock `BE FC`, `0x00015A0C`). Never returns.
 pub fn enter_bootloader() -> ! {
+    enter_bootloader_after(0)
+}
+
+/// [`enter_bootloader`] with `extra_ms` more delay before the jump (bring-up probes encode
+/// state in it; the watchdog is already stopped then).
+pub fn enter_bootloader_after(extra_ms: u32) -> ! {
     quiesce();
     // Stock waits 1 s here: lets the host notice the detach before the loader re-enumerates.
-    delay_ms(1000);
+    delay_ms(1000 + extra_ms);
     if STARTED.load(Ordering::Relaxed) & STARTED_USB != 0 {
         // Controller reset so the loader's USB stack starts from a clean state.
         let usb = pac::USB0;

@@ -415,6 +415,7 @@ fn GPTMR1() {
         unsafe { riscv::interrupt::enable() };
         process_frames();
         riscv::interrupt::disable();
+        crate::probe_isr(STATS.scans.load(Relaxed));
         IN_PROCESS.store(false, Relaxed);
     }
     plic::complete(hpm_hal::interrupt::GPTMR1);
