@@ -179,12 +179,18 @@ fn preview_area_is_ram_only_without_ack() {
 }
 
 #[test]
-fn full_wipe_erases_everything_then_reboots() {
+fn full_wipe_keeps_calibration_then_reboots() {
     let (mut kb, mut st) = boot();
-    // the key layer raises Event::FactoryReset for keycode 319 held 5 s; drive it directly
+    kb.global.set_top_value(5, 30123);
+    kb.global.set_bot_value(5, 17456);
+    // the key layer raises Event::FactoryReset for Fn + Esc held 5 s; drive it directly
     kb.request_full_wipe();
     kb.service(&mut st);
-    assert!(stored(&mut st, Slot::Global, BANK1_SIZE).iter().all(|&b| b == 0xFF));
+    let g = stored(&mut st, Slot::Global, BANK1_SIZE);
+    // calibration and switch types survive (deliberate deviation: stock erases them too)
+    assert_eq!(u16::from_le_bytes([g[10], g[11]]), 30123);
+    assert_eq!(u16::from_le_bytes([g[0xB0 + 10], g[0xB0 + 11]]), 17456);
+    assert!(g[0x210..].iter().all(|&b| b == 0xFF));
     for p in 0..4 {
         assert!(stored(&mut st, Slot::Profile(p), BANK2_SIZE).iter().all(|&b| b == 0xFF));
     }

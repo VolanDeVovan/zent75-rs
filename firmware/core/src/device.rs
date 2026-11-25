@@ -156,10 +156,13 @@ impl Keyboard {
             self.hid_gen = self.hid_gen.wrapping_add(1);
         }
         self.lighting.on_scan(&self.keys, &self.profile);
+        // the Fn layer as the key pipeline resolved it (stock flag 0x91F9C)
+        self.lighting.set_fn_held(self.keys.fn_layer());
         if self.heartbeat_left > 0 {
             self.heartbeat_left -= 1;
             if self.heartbeat_left == 0 {
                 self.diag_flag = false; // stock clears the DA flag with the stream
+                self.engine.set_diag(false);
             }
         }
         self.switch_cooldown = self.switch_cooldown.saturating_sub(1);
@@ -180,8 +183,11 @@ impl Keyboard {
         match e {
             Bootloader => self.pending.action = Some(SystemAction::EnterBootloader),
             Reboot => self.pending.action = Some(SystemAction::Reboot),
-            // keycode 319 held 5 s: erase bank 1 and all profiles, blink, reboot (stock)
+            // Fn + Esc held 5 s: wipe profiles and bank 1 but keep the calibration (deviation)
             FactoryReset => self.pending.wipe = true,
+            // keycode 305 INITSET (level: repeats while held, like stock)
+            ResetProfile => self.request_profile_reset(),
+            WinLock(on) => self.lighting.set_winlock(on),
             SwitchProfile(p) => self.request_switch(p, false),
             // key-driven changes are RAM only in stock (persisted by the next `BE 02`)
             ProfileChanged | ConfigChanged => self.apply_config(),
@@ -287,6 +293,7 @@ impl Keyboard {
             Request::Diag(v) => {
                 if v == 2 || v == 3 {
                     self.diag_flag = v == 3;
+                    self.engine.set_diag(self.diag_flag);
                 }
                 None
             }
@@ -392,12 +399,16 @@ impl Keyboard {
         self.lighting.start_profile_blink(p);
     }
 
-    /// Keycode 319: erase bank 1 and all profiles; the next boot is a first boot.
+    /// Fn + Esc held 5 s: erase all profiles and bank 1 — except the per-key calibration
+    /// (`top_value`, `bot_value`) and switch types (`keytype_code`), which stock also erases
+    /// (a nasty trap on a daily driver: deliberate deviation). The next boot is otherwise a
+    /// first boot.
     fn wipe(&mut self, st: &mut impl Storage) {
         // blank images live in flash, not on the stack
-        static BLANK1: [u8; BANK1_SIZE] = [0xFF; BANK1_SIZE];
         static BLANK2: [u8; BANK2_SIZE] = [0xFF; BANK2_SIZE];
-        let _ = st.store(Slot::Global, &BLANK1);
+        const KEEP: usize = 0x210; // top / bot / keytype, 88 × u16 each
+        self.global.0[KEEP..].fill(0xFF);
+        let _ = st.store(Slot::Global, &self.global.0);
         for p in 0..PROFILE_COUNT {
             let _ = st.store(Slot::Profile(p as u8), &BLANK2);
         }
@@ -408,6 +419,9 @@ impl Keyboard {
     pub fn vendor_poll(&mut self, out: &mut [u8; REPORT_SIZE]) -> Option<usize> {
         if let Some(p) = self.pending.profile_notice.take() {
             return Some(Reply::new(out).with_arg(cmd::SWITCH_PROFILE, p));
+        }
+        if let Some(n) = self.engine.take_calibration_frame(out) {
+            return Some(n); // calibration mode: no heartbeat needed (stock)
         }
         if self.heartbeat_left == 0 {
             return None;

@@ -127,13 +127,14 @@ fn socket_commands_drive_the_keyboard() {
     c.cmd("release all");
     c.wait_hid("mods=00 keys=-");
 
-    // partial travel below the 1.6 mm actuation point does not press
-    c.cmd("travel S 0.5");
+    // partial travel below the 1.6 mm actuation point does not press (F: normal mode; the
+    // factory profile 0 has W/A/S/D in rapid trigger, which would actuate at 0.5 mm)
+    c.cmd("travel F 0.5");
     std::thread::sleep(Duration::from_millis(100));
     assert!(c.field("hid ").contains("keys=-"));
-    c.cmd("travel S 2.5");
-    c.wait_hid("keys=16");
-    c.cmd("release S");
+    c.cmd("travel F 2.5");
+    c.wait_hid("keys=09");
+    c.cmd("release F");
     c.wait_hid("keys=-");
 
     // tap: press then automatic release
