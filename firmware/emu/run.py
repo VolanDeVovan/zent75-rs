@@ -44,7 +44,8 @@ class Result:
 def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None = None,
          strict_pinmux: bool = False, align_check: bool = True, trace=None, verbose=False,
          enter_bootloader_ms: float | None = None, show_mmio: bool = True,
-         reset_flags: int = 0, expect_bootloader: bool = False, preload=None) -> Result:
+         reset_flags: int = 0, expect_bootloader: bool = False, preload=None,
+         adc_rest: int | None = None, presses=()) -> Result:
     """Run the gate on an ELF/UF2 path (or an `Image`) and return the `Result`."""
     img = path if isinstance(path, Image) else Image.load(path)
     names = RegNames()
@@ -55,6 +56,10 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
         m.preload_flash(config_banks_from_backup(backup))
     if preload:
         m.preload_flash(preload)
+    if adc_rest is not None:
+        m.sensor.rest = adc_rest
+    for spec in presses:
+        m.sensor.press(*parse_press(spec))
     reason = "not-started"
     hook_target = None
     if m.boot():
@@ -74,6 +79,16 @@ def gate(path, ms: float = 1200.0, backup: str | None = None, banner: str | None
     lines = report(m, reason, img, names, banner, strict_pinmux, ms, backup, hook_target,
                    enter_bootloader_ms, show_mmio, expect_bootloader)
     return Result(m, reason, lines)
+
+
+def parse_press(spec: str):
+    """'ADC0:1:3:100-200:0xC000' -> (adc, channel, mux step, start_ms, end_ms, value)."""
+    try:
+        adc, ch, step, span, value = spec.split(":")
+        t0, t1 = span.split("-")
+        return adc.upper(), int(ch, 0), int(step, 0), float(t0), float(t1), int(value, 0)
+    except ValueError:
+        raise ValueError(f"bad --press {spec!r}, want ADCn:channel:step:start-end:value") from None
 
 
 def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, hook_target,
@@ -222,6 +237,18 @@ def report(m: Machine, reason, img, names, banner, strict_pinmux, ms, backup, ho
         for k, v in m.irq_count.most_common():
             p(f"  {k}: {v}")
 
+    act = []
+    for x in m.bus.models:
+        for attr, label in (("sequences", "sequences"), ("periods", "periods"), ("reloads", "reloads"),
+                            ("transfers", "transfers")):
+            if getattr(x, attr, 0):
+                act.append(f"{x.name}: {getattr(x, attr)} {label}")
+    if act:
+        p("")
+        p("== peripheral activity")
+        for a in act:
+            p(f"  {a}")
+
     if m.flash_ops or m.rom_calls:
         p("")
         p("== ROM API")
@@ -266,6 +293,9 @@ def main(argv=None) -> int:
                     help="PPOR reset_flag at boot (e.g. 0x10000 = previous reset by EWDG0)")
     ap.add_argument("--expect-bootloader", action="store_true",
                     help="require a clean jump to the loader (use with --reset-flags)")
+    ap.add_argument("--adc-rest", type=lambda x: int(x, 0), help="ADC result of an idle input (default 0x8000)")
+    ap.add_argument("--press", action="append", default=[], metavar="ADCn:CH:STEP:T0-T1:VALUE",
+                    help="override one ADC slot (channel, mux step 0..10) between T0 and T1 ms")
     ap.add_argument("--no-mmio", action="store_true", help="omit the MMIO write list")
     ap.add_argument("-v", "--verbose", action="store_true", help="print events and UART live")
     a = ap.parse_args(argv)
@@ -279,7 +309,8 @@ def main(argv=None) -> int:
         res = gate(a.image, ms=a.ms, backup=a.backup, banner=a.banner, strict_pinmux=a.strict_pinmux,
                    align_check=not a.no_align_check, trace=trace, verbose=a.verbose,
                    enter_bootloader_ms=a.enter_bootloader, show_mmio=not a.no_mmio,
-                   reset_flags=a.reset_flags, expect_bootloader=a.expect_bootloader)
+                   reset_flags=a.reset_flags, expect_bootloader=a.expect_bootloader,
+                   adc_rest=a.adc_rest, presses=a.press)
     except (OSError, ValueError) as e:
         print(f"cannot load {a.image}: {e}", file=sys.stderr)
         return 2

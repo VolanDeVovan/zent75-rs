@@ -16,6 +16,7 @@ from unicorn import riscv_const as R
 import rvext
 from image import APP_BASE, APP_END, FLASH_BASE, FLASH_SIZE, SIGNATURE, Image
 from periph import Bus, Mchtmr, Plic, default_models
+from scan import SensorSource, scan_models
 
 M32 = 0xFFFFFFFF
 
@@ -113,7 +114,8 @@ class Machine:
         uc.mem_write(PROTECTED_END, b"\xff" * (FLASH_BASE + FLASH_SIZE - PROTECTED_END))
 
         self.bus = Bus(self)
-        for p in default_models(self):
+        self.sensor = SensorSource()
+        for p in default_models(self) + scan_models(self, self.sensor):
             self.bus.add(p)
         self.plic: Plic = next(p for p in self.bus.models if isinstance(p, Plic))
         self.timer: Mchtmr = next(p for p in self.bus.models if isinstance(p, Mchtmr))

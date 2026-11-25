@@ -249,3 +249,62 @@ def test_firmware_loader_exit_paths():
     if any("check_reset_cause" in n for _, _, n in img.symbols):
         res = gate(DEFAULT_ELF, ms=3000, reset_flags=1 << 16, expect_bootloader=True, show_mmio=False)
         assert res.ok and res.reason == "bootloader", res.text
+
+
+# ---- interrupts + scan peripherals on a hand-assembled ISR ---------------------------------------
+ADC0 = 0xF3080000
+COUNTER = 0x00090100
+MRET = 0x30200073
+
+
+def csr(f3, csrno, rs1_or_imm, rd=0):
+    return [(csrno << 20) | (rs1_or_imm << 15) | (f3 << 12) | (rd << 7) | 0x73]
+
+
+def store(addr, value):
+    return li(T0, addr) + li(T1, value) + sw(T1, T0, 0)
+
+
+def isr_image(setup):
+    """main: vector table entry 58 -> handler, vectored PLIC, ADC0 IRQ enabled, `setup`, idle.
+    handler: COUNTER += 1, clear ADC0 int_sts, complete IRQ 58, mret."""
+    handler = li(T0, COUNTER) + lw(T1, T0, 0) + addi(T1, T1, 1) + sw(T1, T0, 0)
+    handler += store(ADC0 + 0x1110, 1 << 23) + store(0xE4200004, 58) + [MRET]
+
+    def main(h):
+        code = li(SP, 0x000A0000) + store(COUNTER, 0) + store(4 * 58, h)
+        code += csr(1, 0x305, 0)  # mtvec = 0 (vector table at ILM 0)
+        code += csr(6, 0x7D0, 2)  # mmisc_ctl.VEC_PLIC
+        code += store(0xE4000000, 2) + store(0xE4000000 + 4 * 58, 1) + store(0xE4002004, 1 << 26)
+        code += store(ADC0 + 0x804, 0x00090000) + store(ADC0 + 0x80C, 3)  # seq DMA, 4 words
+        code += store(ADC0 + 0x810, 1) + store(ADC0 + 0x814, 3 | 0x20)  # queue: ch1, ch3+int
+        code += store(ADC0 + 0x1114, 1 << 23)  # int_en seq_cvc
+        code += li(T0, 0x800) + csr(2, 0x304, T0) + csr(6, 0x300, 8)  # mie.MEIE, mstatus.MIE
+        return code + setup + IDLE
+    h = APP + 4 + 4 * len(main(0))
+    return image(main(h) + handler)
+
+
+def test_adc_sw_trigger_interrupt_and_dma():
+    res = gate(isr_image(store(ADC0 + 0x800, (1 << 8) | 2 | 4)), ms=1, show_mmio=False)
+    assert res.ok, res.text
+    m = res.m
+    assert struct.unpack("<I", m.uc.mem_read(COUNTER, 4))[0] == 1
+    w0, w1 = struct.unpack("<2I", m.uc.mem_read(0x00090000, 8))
+    assert (w0 >> 20) & 0x1F == 1 and (w0 >> 16) & 0xF == 0
+    assert (w1 >> 20) & 0x1F == 3 and (w1 >> 16) & 0xF == 1
+    assert abs((w0 & 0xFFFF) - 0x8000) < 8
+    assert m.irq_count.get("ADC0") == 1
+
+
+def test_pwm0_hardware_trigger_rate():
+    pwm0 = 0xF0318000
+    setup = store(ADC0 + 0x800, (1 << 8) | 1)  # hw_trig_en, 2 conversions
+    setup += store(pwm0 + 0x08, (20000 - 1) << 4)  # 125 us period at 160 MHz
+    setup += store(pwm0 + 0x0C, 320 << 4) + store(pwm0 + 0x14, 10320 << 4)  # cmp[0], cmp[2]
+    setup += store(pwm0 + 0x80 + 4 * 8, 0x15000000)  # chcfg[8]
+    setup += store(pwm0 + 0xF0, 1 << 7)  # gcr.cen
+    res = gate(isr_image(setup), ms=1, show_mmio=False)
+    assert res.ok, res.text
+    n = struct.unpack("<I", res.m.uc.mem_read(COUNTER, 4))[0]
+    assert 14 <= n <= 17, n  # 8 periods x 2 triggers in 1 ms
