@@ -11,5 +11,9 @@ __pycache__/
 # firmware/vendor/*.uf2 stay committed as the original images).
 /firmware/zent75-rs.uf2
 /firmware/*.bin
+/firmware/app/*.bin
 .pytest_cache/
 .ruff_cache/
+
+# local RE workspace (vendor code derivatives, never commit)
+/re-work/

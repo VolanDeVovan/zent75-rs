@@ -1,0 +1,19 @@
+[package]
+name = "zent-core"
+version = "0.1.0"
+edition = "2024"
+description = "Hardware-independent logic of the ZENT75-HE firmware: protocol, config banks, HE engine, keymap, lighting"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+std = []
+
+[dependencies]
+
+[dev-dependencies]
+zent-core = { path = ".", features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"

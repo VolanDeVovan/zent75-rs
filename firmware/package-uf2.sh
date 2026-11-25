@@ -11,13 +11,13 @@
 # does that (see firmware/README.md).
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/app"
 
 TARGET="riscv32imafc-unknown-none-elf"
 NAME="zent75-rs"
 ELF="target/${TARGET}/release/${NAME}"
 BIN="target/${TARGET}/release/${NAME}.bin"
-UF2="${NAME}.uf2"
+UF2="../${NAME}.uf2"
 BASE="0x80040000"
 FAMILY="0x0b4d5475"
 
@@ -50,7 +50,7 @@ if [ "$word0" != "0b4d5475" ]; then
 fi
 echo ">> boot signature OK: word0 = 0x$word0"
 
-echo ">> python3 ../tools/uf2.py pack $BIN -b $BASE -f $FAMILY -o $UF2"
-python3 ../tools/uf2.py pack "$BIN" -b "$BASE" -f "$FAMILY" -o "$UF2"
+echo ">> python3 ../../tools/uf2.py pack $BIN -b $BASE -f $FAMILY -o $UF2"
+python3 ../../tools/uf2.py pack "$BIN" -b "$BASE" -f "$FAMILY" -o "$UF2"
 
 echo ">> done: $(pwd)/$UF2"
