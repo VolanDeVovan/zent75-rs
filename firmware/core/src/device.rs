@@ -198,6 +198,12 @@ impl Keyboard {
         self.pending.switch_to = Some(p);
     }
 
+    /// Keycode 319 held 5 s: erase bank 1 and all profiles, blink, reboot (what the key
+    /// layer's `Event::FactoryReset` does). Executed by the next [`Keyboard::service`].
+    pub fn request_full_wipe(&mut self) {
+        self.pending.wipe = true;
+    }
+
     /// Keycode 305 (`INITSET`): reset the active profile to defaults and save it (like `BE EE`).
     /// Executed by the next [`Keyboard::service`].
     pub fn request_profile_reset(&mut self) {
